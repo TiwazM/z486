@@ -35,6 +35,15 @@ module tb_protected_mode #(
     reg         resp_valid;
     reg         intr = 0;
     reg         nmi = 0;
+    // PC/AT coprocessor error (+x87_irq13): FERR# going active raises IRQ13
+    // through INTR (vector +x87_irq13_vector=, default 0x75; the 8259 latches
+    // the edge until INTA); a write to port F0h, which is then the AT's
+    // coprocessor port and not the instruction-delay port, asserts IGNNE#
+    // while FERR# stays active, as the boards' glue does. Without it IGNNE#
+    // stays inactive and FERR# goes nowhere: a waiting FP instruction with
+    // CR0.NE=0 freezes.
+    wire        x87_ferr;
+    reg         x87_ignne = 1'b0;
     wire        inta;
     wire        triple_fault_reset;
 
@@ -63,8 +72,8 @@ module tb_protected_mode #(
         .intr(intr),
         .nmi(nmi),
         .inta(inta),
-        .x87_ferr(),
-        .x87_ignne(1'b0),
+        .x87_ferr(x87_ferr),
+        .x87_ignne(x87_ignne),
         .snoop_addr(32'h0),
         .snoop_valid(1'b0),
         .a20_enable(1'b1),
@@ -627,9 +636,41 @@ module tb_protected_mode #(
     longint x87_reg_waits = 0;
     int expect_x87_held = 0;
     int expect_x87_reg_waits = 0;
+    // +expect_x87_waits=N: at least N WAITs completed in place (x87-wait,
+    // its word retired as a NOP); +expect_x87_held_waits=N: at least N of
+    // them first held while the x87 finished the work before them;
+    // +expect_x87_wait_routines=N: at least N WAITs ran the original routine
+    // (#NM, an exception to report, a long operation).
+    longint x87_waits = 0;
+    longint x87_held_waits = 0;
+    longint x87_wait_routines = 0;
+    int expect_x87_waits = 0;
+    int expect_x87_held_waits = 0;
+    int expect_x87_wait_routines = 0;
     initial begin
         void'($value$plusargs("expect_x87_held=%d", expect_x87_held));
         void'($value$plusargs("expect_x87_reg_waits=%d", expect_x87_reg_waits));
+        void'($value$plusargs("expect_x87_waits=%d", expect_x87_waits));
+        void'($value$plusargs("expect_x87_held_waits=%d", expect_x87_held_waits));
+        void'($value$plusargs("expect_x87_wait_routines=%d", expect_x87_wait_routines));
+    end
+    reg x87_wait_held = 1'b0;
+    always @(posedge clk) begin
+        if (reset_n) begin
+            if (dut.x87.wait_hold_r)
+                x87_wait_held <= 1'b1;
+            if (dut.x87.store_exec && dut.x87.wait_go_r) begin
+                x87_waits <= x87_waits + 1;
+                if (x87_wait_held)
+                    x87_held_waits <= x87_held_waits + 1;
+                x87_wait_held <= 1'b0;
+            end
+            if (dut.recipe_fallback_taken && dut.i_first && !dut.i.has_0f &&
+                (dut.i.opcode == 8'h9B)) begin
+                x87_wait_routines <= x87_wait_routines + 1;
+                x87_wait_held <= 1'b0;
+            end
+        end
     end
     generate
     if (ENABLE_X87) begin : gen_x87_overlap_counts
@@ -682,6 +723,14 @@ module tb_protected_mode #(
     int       nmi_pulse_cycles = 1;    // NMI high width in cycles (for deterministic edge delivery)
     int       nmi_hold_count = 0;
     reg       inta_first = 0;          // Track first vs second INTA pair
+    reg       irq13_en = 1'b0;         // +x87_irq13: FERR# -> IRQ13, port F0h -> IGNNE#
+    reg [7:0] irq13_vector = 8'h75;
+    reg       irq13_req = 1'b0;        // IRQ13 raised, not yet acknowledged
+    reg       x87_ferr_d = 1'b0;
+    initial begin
+        irq13_en = $test$plusargs("x87_irq13");
+        void'($value$plusargs("x87_irq13_vector=%h", irq13_vector));
+    end
     reg       inta_resp_pending = 0;
     reg [31:0] inta_resp_data = 32'h0;
 
@@ -710,6 +759,16 @@ module tb_protected_mode #(
 
         ready <= !rd_busy;
         resp_valid <= 1'b0;
+
+        x87_ferr_d <= x87_ferr;
+        if (irq13_en && x87_ferr && !x87_ferr_d) begin
+            irq13_req <= 1'b1;
+            intr <= 1'b1;
+            if ($test$plusargs("trace_io"))
+                $display("[TB] FERR#: IRQ13 at cycle %0d", cycle);
+        end
+        if (!x87_ferr)
+            x87_ignne <= 1'b0;
         // Don't clear din - hold it stable for page walker timing
 
         // Handle pending read with latency countdown, then return one DWORD per cycle.
@@ -770,10 +829,12 @@ module tb_protected_mode #(
                         $display("INTA cycle 1 (dummy)");
                 end else begin
                     inta_first <= 1'b0;
-                    inta_resp_data <= {24'h0, intr_vector};
+                    inta_resp_data <= {24'h0, irq13_req ? irq13_vector : intr_vector};
+                    irq13_req <= 1'b0;
                     intr <= 1'b0;
                     if ($test$plusargs("trace_io"))
-                        $display("INTA cycle 2: vector=0x%02X", intr_vector);
+                        $display("INTA cycle 2: vector=0x%02X",
+                                 irq13_req ? irq13_vector : intr_vector);
                 end
             end else if (!write) begin
                 // Read
@@ -831,7 +892,10 @@ module tb_protected_mode #(
                             (x87_direct_stores < expect_x87_direct_stores) ||
                             (x87_direct_control < expect_x87_direct_control) ||
                             (x87_held < expect_x87_held) ||
-                            (x87_reg_waits < expect_x87_reg_waits)) begin
+                            (x87_reg_waits < expect_x87_reg_waits) ||
+                            (x87_waits < expect_x87_waits) ||
+                            (x87_held_waits < expect_x87_held_waits) ||
+                            (x87_wait_routines < expect_x87_wait_routines)) begin
                             test_status <= 8'hFF;
                             $display("");
                             $display("========================================");
@@ -851,6 +915,15 @@ module tb_protected_mode #(
                             else if (x87_reg_waits < expect_x87_reg_waits)
                                 $display("  x87 register commands that waited for the bridge: %0d, expected %0d",
                                          x87_reg_waits, expect_x87_reg_waits);
+                            else if (x87_waits < expect_x87_waits)
+                                $display("  WAITs completed in place: %0d, expected %0d",
+                                         x87_waits, expect_x87_waits);
+                            else if (x87_held_waits < expect_x87_held_waits)
+                                $display("  WAITs that held for the x87: %0d, expected %0d",
+                                         x87_held_waits, expect_x87_held_waits);
+                            else if (x87_wait_routines < expect_x87_wait_routines)
+                                $display("  WAITs that ran the original routine: %0d, expected %0d",
+                                         x87_wait_routines, expect_x87_wait_routines);
 
                             else if (vipt_ea_interlock_cycles == 0)
                                 $display("  VIPT load-to-EA interlock was not exercised");
@@ -902,6 +975,13 @@ module tb_protected_mode #(
                             if (expect_x87_reg_waits != 0)
                                 $display("  x87 register commands that waited for the bridge: %0d",
                                          x87_reg_waits);
+                            if (expect_x87_waits != 0)
+                                $display("  WAITs completed in place: %0d", x87_waits);
+                            if (expect_x87_held_waits != 0)
+                                $display("  WAITs that held for the x87: %0d", x87_held_waits);
+                            if (expect_x87_wait_routines != 0)
+                                $display("  WAITs that ran the original routine: %0d",
+                                         x87_wait_routines);
 
                             $display("========================================");
                             test_done <= 1;
@@ -972,7 +1052,11 @@ module tb_protected_mode #(
 
                 // Signal instruction delay (0xF0) - low 16 bits are retired instruction delay
                 // 0 means use cycle delay mode.
-                if (port == 16'h00F0) begin
+                if ((port == 16'h00F0) && irq13_en) begin
+                    x87_ignne <= x87_ferr;
+                    if ($test$plusargs("trace_io"))
+                        $display("AT F0h: IGNNE#=%b", x87_ferr);
+                end else if (port == 16'h00F0) begin
                     signal_delay_instr <= dout[15:0];
                     if ($test$plusargs("trace_io"))
                         $display("SIGNAL CFG: instruction delay=%0d", dout[15:0]);
