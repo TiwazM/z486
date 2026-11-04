@@ -17,7 +17,7 @@
   "cycles": 400000,
   "page_tables": [],
   "sim_plusargs": [
-    "expect_x87_held=48",
-    "expect_x87_reg_waits=12"
+    "expect_x87_held=66",
+    "expect_x87_reg_waits=20"
   ]
 }

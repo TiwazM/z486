@@ -13,6 +13,9 @@
 ; - Dependent chains through ST0 and ST(i), destination ST0 and ST(i),
 ;   reversed operands, both operands the destination (FMUL ST,ST(0)),
 ;   FSQRT and FRNDINT ahead of and behind arithmetic.
+; - FSCALE ahead of and behind arithmetic, FSQRT and FRNDINT, with positive
+;   and negative scale factors, a held FXCH and FLD ST(i), and an overflow
+;   (masked: OE, PE).
 ; - Pops ahead of the held command (FMULP, FADDP, FCOMP, FCOMPP, FSUBRP):
 ;   it sees TOP after them. FADDP ST(0),ST, whose result goes to the row it
 ;   pops, then FLD ST(7) of that row.
@@ -97,6 +100,29 @@ STATUS_FAIL equ 0xFF
     fmul st0, st0
     fmul st0, st0
     fmul st0, st1
+    fstp qword [bx + 8]
+%endmacro
+
+%macro SEQ_SCALE 0
+    fld qword [vneg]                ; -2
+    fld qword [vthree]              ; 3, -2
+    fld qword [va]                  ; 1.5, 3, -2
+    fscale                          ; 12
+    fmul st0, st0                   ; 144, behind FSCALE
+    fscale                          ; 1152, behind the multiply
+    fsqrt                           ; 33.94...
+    fscale                          ; 271.5...
+    frndint                         ; 272, behind FSCALE (PE)
+    fxch st2                        ; -2, 3, 272
+    fld st2                         ; 272, -2, 3, 272
+    fscale                          ; 68
+    fdivr st0, st3                  ; 4
+    fscale                          ; 1
+    fst qword [bx]
+    fld qword [vbig]                ; 20000, 1, -2, 3, 272
+    fxch st1
+    fscale                          ; 1 * 2^20000: inf (OE, PE)
+    fchs                            ; behind FSCALE
     fstp qword [bx + 8]
 %endmacro
 
@@ -346,6 +372,7 @@ start:
     mov ax, [buf_a + 8]
     CHECK_AX 0x02ff, 0x0241         ; IE, SF, C1 set (overflow)
     RUN SEQ_CONTROL, 7
+    RUN SEQ_SCALE, 10
 
     ; ---- unmasked exceptions (NE: #MF) --------------------------------------
     mov eax, cr0
@@ -468,6 +495,7 @@ vd:      dq 7.0
 ve:      dq -3.25
 vz:      dq 0.0
 vthree:  dq 3.0
+vbig:    dq 20000.0
 vneg:    dq -2.0
 i64:     dq -123456789
 t80:     dq 0xc90fdaa22168c235
