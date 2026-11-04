@@ -16,6 +16,7 @@ module tb_x87_bridge;
     logic req_read_complete;
     logic [31:0] req_rdata;
     logic        posted_pending;
+    logic        idle;
 
     logic cmd_valid;
     logic [10:0] cmd_fop;

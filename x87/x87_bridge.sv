@@ -16,6 +16,7 @@ module x87_bridge (
     output logic        req_read_complete,
     output logic [31:0] req_rdata,
     output logic        posted_pending,     // a posted write still awaits dispatch
+    output logic        idle,               // a request now is accepted (from state only)
 
     output logic        cmd_valid,          // Registered command-stream request.
     output logic [10:0] cmd_fop,            // ESC opcode plus complete ModR/M FOP.
@@ -61,6 +62,7 @@ always_comb begin
                    ((state == BR_COMPLETE) && !write_r);
     req_read_complete = (state == BR_COMPLETE) && !write_r;
     posted_pending = (state == BR_DISPATCH) && write_r;
+    idle = (state == BR_IDLE);
     req_rdata = rdata_r;
 
     // Keep the command-stream exclusion seen by the direct m32 path behind

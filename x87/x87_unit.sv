@@ -124,6 +124,7 @@ logic        dcmd_wait;            // ...still, this cycle: the instruction hold
 logic        queue_short;          // The bridge's command will be taken soon.
 logic        posted_pending;       // The bridge holds a posted write.
 logic        br_accepted, br_complete;
+logic        br_idle;              // The bridge takes a request now.
 logic        br_read_complete;
 logic [31:0] br_rdata;
 // Stores and status reads share the store word and the result path.
@@ -174,7 +175,10 @@ assign store_hold = direct_st_r && store_word && (st_state != ST_DONE);
 assign store_opr_commit = st_commit_r;
 assign store_record = st_commit_r && (st_state == ST_DONE) && !st_status_r;
 assign store_opr_data = st_part0_r;
-assign dcmd_wait = dcmd_pending_r && !br_accepted;
+// The register command is the bridge's request while it waits: it is taken
+// exactly when the bridge is idle (registers only, nothing from the CPU's
+// other requests).
+assign dcmd_wait = dcmd_pending_r && !br_idle;
 assign direct_stall = ((direct_active || op_post_r) && !direct_release) || store_hold ||
                       dcmd_wait;
 
@@ -220,7 +224,7 @@ if (ENABLE_X87) begin : gen_x87
         .req_wdata(own_cmd ? {21'd0, direct_fop} : req_wdata),
         .req_accepted(br_accepted), .req_complete(br_complete),
         .req_read_complete(br_read_complete), .req_rdata(br_rdata),
-        .posted_pending(posted_pending),
+        .posted_pending(posted_pending), .idle(br_idle),
         .cmd_valid(cmd_valid), .cmd_fop(cmd_fop), .cmd_ready(cmd_ready),
         .word_in_valid(word_in_valid), .word_in_be(word_in_be),
         .word_in_data(word_in_data), .word_in_ready(word_in_ready),
@@ -264,6 +268,7 @@ end else begin : gen_no_x87
     assign br_rdata = 32'h0;
     assign br_complete = 1'b0;
     assign posted_pending = 1'b0;
+    assign br_idle = 1'b1;
     assign req_read_complete = 1'b0;
     assign req_rdata = 32'h0;
     assign busy_n = 1'b1;
@@ -428,9 +433,12 @@ always_ff @(posedge clk) begin
 end
 
 // synthesis translate_off
-always_ff @(posedge clk)
+always_ff @(posedge clk) begin
     if (reset_n && direct_st_r && (st_state == ST_DONE) && result_valid)
         $error("x87 store result has more parts than its overlay writes");
+    if (reset_n && dcmd_pending_r && (br_accepted != br_idle))
+        $error("x87 register command acceptance differs from bridge idle");
+end
 // synthesis translate_on
 
 `ifdef Z486_COSIM
