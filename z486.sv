@@ -3123,7 +3123,12 @@ x87_unit #(.ENABLE_X87(ENABLE_X87)) x87 (
     .req_rdata(x87_rdata),
     .direct_launch(i_issue),
     .direct_candidate(x87_direct_candidate),
-    .direct_allowed(!CR0[3] && !CR0[2] && !x87_off),
+    // MOV CR0, CLTS and LMSW write CR0 in their RNI delay slot, beside which
+    // the next instruction can issue: while a CR0 write is current, EM and
+    // TS may be about to change, so the original routine (whose protection
+    // test reads CR0 when it runs) decides.
+    .direct_allowed(!CR0[3] && !CR0[2] && !x87_off &&
+                    !(uc_active && (uc_dest == DEST_CR0))),
     .direct_fop(i.fop),
     .launch_fop(i_bus.fop),
     .operand_part(uc_exec && (uc_dest == DEST_USTEP_X87_OPERAND)),
