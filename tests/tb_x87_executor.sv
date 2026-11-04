@@ -604,6 +604,8 @@ initial begin
     integer operation;
     logic signed [63:0] expected_integer;
     x87_reg_t value;
+    logic [63:0] rng;
+    logic [63:0] raw;
 
     start = 1'b0;
     v1_start = 1'b0;
@@ -697,6 +699,21 @@ initial begin
     for (mode = 0; mode < 4; mode = mode + 1)
         for (case_index = 0; case_index < 12; case_index = case_index + 1)
             test_round(round_cases[case_index], 2'(mode));
+
+    // FRNDINT around the integer point (|x| from 2^-3 to 2^60, every
+    // rounding mode), every fourth with a run of ones that carries into the
+    // next power of two (xorshift64, fixed seed).
+    rng = 64'h9e37_79b9_7f4a_7c15;
+    for (case_index = 0; case_index < 2000; case_index = case_index + 1) begin
+        rng = rng ^ (rng << 13);
+        rng = rng ^ (rng >> 7);
+        rng = rng ^ (rng << 17);
+        raw = rng;
+        raw[62:52] = 11'd1020 + 11'(rng[37:32]);
+        if (case_index % 4 == 3)
+            raw[51:0] = {52{1'b1}} << (rng[45:40] % 6'd52);
+        test_round(raw, rng[1:0]);
+    end
 
     for (case_index = 0; case_index < 8; case_index = case_index + 1) begin
         test_load(X87_CONVERT_FLD_M32, {32'h0, m32_cases[case_index]}, 2'd0,
