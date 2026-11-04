@@ -602,6 +602,23 @@ module tb_protected_mode #(
     always @(posedge clk)
         if (reset_n && dut.x87_load_commit && dut.x87.op_post_r)
             x87_operand_loads <= x87_operand_loads + 1;
+    // +expect_x87_direct_stores=N: at least N x87 stores (x87-st-m16/m32/
+    // m64/m80) wrote their result without falling back.
+    longint x87_direct_stores = 0;
+    int expect_x87_direct_stores = 0;
+    initial void'($value$plusargs("expect_x87_direct_stores=%d", expect_x87_direct_stores));
+    always @(posedge clk)
+        if (reset_n && dut.x87_store_record)
+            x87_direct_stores <= x87_direct_stores + 1;
+    // +expect_x87_direct_control=N: at least N FNSTSW, FNSTCW and FLDCW took
+    // the direct paths (x87-fnstsw-ax/m16, x87-fldcw) without falling back.
+    longint x87_direct_control = 0;
+    int expect_x87_direct_control = 0;
+    initial void'($value$plusargs("expect_x87_direct_control=%d", expect_x87_direct_control));
+    always @(posedge clk)
+        if (reset_n && ((dut.x87.store_opr_commit && dut.x87.st_status_r) ||
+                        (dut.x87.direct_release && dut.x87.op_ctrl_r)))
+            x87_direct_control <= x87_direct_control + 1;
 
     // A load-to-AGI regression must both exercise the dependency and prevent
     // the dependent instruction from issuing while its EA input is pending.
@@ -782,7 +799,9 @@ module tb_protected_mode #(
                             ($test$plusargs("expect_vipt_store_replay") &&
                              ((vipt_store_wait_issues == 0) ||
                               (vipt_store_replays == 0))) ||
-                            (x87_operand_loads < expect_x87_operand_loads)) begin
+                            (x87_operand_loads < expect_x87_operand_loads) ||
+                            (x87_direct_stores < expect_x87_direct_stores) ||
+                            (x87_direct_control < expect_x87_direct_control)) begin
                             test_status <= 8'hFF;
                             $display("");
                             $display("========================================");
@@ -790,6 +809,12 @@ module tb_protected_mode #(
                             if (x87_operand_loads < expect_x87_operand_loads)
                                 $display("  x87 operand-transport loads: %0d, expected %0d",
                                          x87_operand_loads, expect_x87_operand_loads);
+                            else if (x87_direct_stores < expect_x87_direct_stores)
+                                $display("  x87 direct stores: %0d, expected %0d",
+                                         x87_direct_stores, expect_x87_direct_stores);
+                            else if (x87_direct_control < expect_x87_direct_control)
+                                $display("  x87 direct FNSTSW/FNSTCW/FLDCW: %0d, expected %0d",
+                                         x87_direct_control, expect_x87_direct_control);
                             else if (vipt_ea_interlock_cycles == 0)
                                 $display("  VIPT load-to-EA interlock was not exercised");
                             else
@@ -828,6 +853,12 @@ module tb_protected_mode #(
                             if (expect_x87_operand_loads != 0)
                                 $display("  x87 operand-transport loads: %0d",
                                          x87_operand_loads);
+                            if (expect_x87_direct_stores != 0)
+                                $display("  x87 direct stores: %0d",
+                                         x87_direct_stores);
+                            if (expect_x87_direct_control != 0)
+                                $display("  x87 direct FNSTSW/FNSTCW/FLDCW: %0d",
+                                         x87_direct_control);
                             $display("========================================");
                             test_done <= 1;
                         end
