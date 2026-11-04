@@ -876,8 +876,11 @@ always_ff @(posedge clk or negedge reset_n) begin
                     raise_perm_fault(req_linear, req_is_write, slow_is_user_mode);
                 end else if (req_can_translate) begin
                     if (req_check_only) begin
+                        // A CW split across dwords checks the second half's
+                        // page too: PG_CROSS_PREP2 points the TLB lookup at it
+                        // (the lookup still holds the first half's address).
                         if (req_crossing)
-                            state <= PG_CROSS_TLB2;
+                            state <= PG_CROSS_PREP2;
                         else
                             complete_mem_request();
                     end else if (req_mem_dcache_accept) begin
