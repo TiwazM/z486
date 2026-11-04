@@ -36,6 +36,8 @@ module x87_control
     input  logic        result_pop,             // A direct store takes the head result fragment.
     output logic        result_valid,           // A store result fragment heads the queue.
     output logic [31:0] result_data,            // ...as the data port would return it.
+    output logic [15:0] status_out,             // Status word, for a direct FNSTSW.
+    output logic [15:0] control_out,            // Control word, for a direct FNSTCW.
 
     output logic        busy_n,                 // Active-low arithmetic busy status.
     output logic        pereq,                  // CPU operand-transfer/completion request.
@@ -791,6 +793,9 @@ assign read_req_ready = !read_resp_valid &&
 // the store that produced them is waiting for them.
 assign result_valid = (tx_kind == TX_VALUE) && transfer_pop_valid;
 assign result_data = transfer_pop_data[31:0];
+// FNSTSW and FNSTCW read these as the f8 port read returns them.
+assign status_out = status_word;
+assign control_out = control_word;
 wire [2:0] rx_fragment_bytes = transfer_byte_count(transfer_pop_data[35:32]);
 wire [3:0] rx_byte_count_next = rx_byte_count + rx_fragment_bytes;
 // The 80386 sends a numeric operand low part first in whole 16-bit words

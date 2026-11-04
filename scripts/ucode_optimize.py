@@ -470,6 +470,37 @@ PATCHES = [
     Patch(0xA3F, "x87 m16 store overlay: RNI delay slot waits for the write",
           copy_from=0x047),
 
+    # FNSTSW AX (3DA: DF /4-/7 register forms, of which only DF E0 is taken;
+    # the others fall back) and FNSTSW/FNSTCW m16 (3D9: DD /7, D9 /7) read
+    # the status or control word without the port protocol. From issue the
+    # hardware waits until every earlier x87 command has completed, which is
+    # when the 386 routine's command write would be accepted, and takes the
+    # word into OPR_R; the store word (X87_STORE) holds until it is there.
+    # FNSTSW AX then moves OPR_R into AX in the RNI delay slot, as the
+    # original routine does (3E6/3E7); the m16 forms write it with a BITS16
+    # WR, after which a fault restarts cleanly (nothing else has changed).
+    # Neither records FIP/FCS:FOP or the operand, as the original routine
+    # does not.
+    Patch(0xA40, "x87 FNSTSW AX overlay: fallback point",
+          copy_from=0x20E),
+    Patch(0xA41, "x87 FNSTSW AX overlay: fallback delay slot",
+          copy_from=0x20E),
+    Patch(0xA42, "x87 FNSTSW AX overlay: RNI DLY when the status word is in OPR_R",
+          copy_from=0x3E6, fields=dict(dst=DEST_USTEP_X87_STORE)),
+    Patch(0xA43, "x87 FNSTSW AX overlay: OPR_R -> AX in the RNI delay slot",
+          copy_from=0x3E7),
+
+    Patch(0xA44, "x87 FNSTSW/FNSTCW m16 overlay: fallback point, word destination",
+          copy_from=0x030, fields=dict(aluop=ALUJMP_BITS16)),
+    Patch(0xA45, "x87 FNSTSW/FNSTCW m16 overlay: fallback delay slot",
+          copy_from=0x20E),
+    Patch(0xA46, "x87 FNSTSW/FNSTCW m16 overlay: DLY until the word is in OPR_R",
+          copy_from=0x030, fields=dict(sub=0, dst=DEST_USTEP_X87_STORE)),
+    Patch(0xA47, "x87 FNSTSW/FNSTCW m16 overlay: WR the word and retire",
+          copy_from=0x0AE, fields=dict(op=0)),
+    Patch(0xA48, "x87 FNSTSW/FNSTCW m16 overlay: RNI delay slot waits for the write",
+          copy_from=0x047),
+
     # Cached RMW alternate entries. RD_FAST/WR_FAST are semantic actions owned
     # by the entry, while the ordinary fields keep ALU, flags, OPR_R/OPR_W and
     # RNI behavior in the microcode/data-unit path. Rejected RD_FAST probes
@@ -819,6 +850,14 @@ OVERLAY_RECIPES = [
                   (0xA3A, 0xA3B, 0xA3C, 0xA3D, 0xA3E, 0xA3F),
                   OverlayQualifier.X87_MEM,
                   RecipeAction.X87_OVERLAY, "x87-direct-store",
+                  ("ea", "paging", "x87-order"), True),
+    OverlayRecipe("x87-fnstsw-ax", 0x3DA, 0xA40, EarlyKind.SEQ,
+                  (0xA40, 0xA41, 0xA42, 0xA43), OverlayQualifier.X87_REG,
+                  RecipeAction.X87_OVERLAY, "x87-direct-status",
+                  ("x87-order",), True),
+    OverlayRecipe("x87-fnstsw-m16", 0x3D9, 0xA44, EarlyKind.SEQ,
+                  (0xA44, 0xA45, 0xA46, 0xA47, 0xA48), OverlayQualifier.X87_MEM,
+                  RecipeAction.X87_OVERLAY, "x87-direct-status",
                   ("ea", "paging", "x87-order"), True),
     OverlayRecipe("rmw-m-r-fast", 0x04A, 0x9CB, EarlyKind.RMW,
                   (0x9CB, 0x9CC, 0x9CD), OverlayQualifier.RMW_MEMORY,

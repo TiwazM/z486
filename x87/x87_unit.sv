@@ -65,9 +65,15 @@ wire        l_m80 = (l_op == 3'd7) ? (l_esc == 3'd3) : (l_op == 3'd6) && (l_esc 
 wire        l_m64 = (l_op == 3'd7) ? (l_esc == 3'd7) : (l_esc == 3'd5) && (l_op[2:1] == 2'b01);
 wire        l_store = !l_reg && ((l_esc[0] && (l_op[2:1] == 2'b01)) || l_m80 || l_m64);
 wire  [1:0] l_parts = l_m80 ? 2'd3 : l_m64 ? 2'd2 : 2'd1;
+// Status reads: FNSTSW AX (DF E0), FNSTSW m16 (DD /7), FNSTCW m16 (D9 /7).
+// The FNSTSW AX overlay also takes DF E1-FF (DF /4-/7 register forms share
+// its entry); those are not status reads here and fall back.
+wire        l_status = (launch_fop == 11'h7e0) ||
+                       (!l_reg && (l_op == 3'd7) && ((l_esc == 3'd1) || (l_esc == 3'd5)));
+wire        l_regcmd = l_reg && !((l_esc == 3'd7) && l_op[2]);    // x87-reg forms
 // Loads whose RD words hand in the operand (x87-m16/m64/m80-load): DC-DF
 // memory forms and DB /5; the m32 loads use direct_mem_req.
-wire        l_operand = !l_reg && !l_store &&
+wire        l_operand = !l_reg && !l_store && !l_status &&
                         (l_esc[2] || ((l_esc[1:0] == 2'b11) && (l_op == 3'd5)));
 
 logic        queue_safe;           // Masked-exception mode permits one queued command.
@@ -109,6 +115,7 @@ logic        posted_pending;       // The bridge holds a posted write.
 logic        br_accepted, br_complete;
 logic        br_read_complete;
 logic [31:0] br_rdata;
+// Stores and status reads share the store word and the result path.
 // Stores: the overlay checks the whole destination for writing first (CW
 // words, so nothing after the command can fault). In the store word, post
 // the FOP as a command, then take the result from the x87's transfer queue
@@ -119,9 +126,18 @@ logic [31:0] br_rdata;
 // ends (ST_DONE), and the WR word after the store word writes it to memory.
 // A part's WR word is an X87_NEXT word: the cycle after it, OPR_R takes the
 // next part for the next WR.
+// Status reads post nothing: from issue (ST_READ) they wait until every
+// earlier x87 command has completed, which is when the 386 routine's
+// command write would be accepted, then take the status or control word as
+// its f8 port read would. The store word holds until the word is in OPR_R.
 typedef enum logic [1:0] {ST_IDLE, ST_CMD, ST_READ, ST_DONE} st_state_t;
 st_state_t   st_state;
-logic        direct_st_r;          // The issued instruction took the store path.
+logic        direct_st_r;          // The issued instruction took the store or status path.
+logic        st_status_r;          // ...a status read (FNSTSW, FNSTCW).
+logic        st_control_r;         // ...of the control word (FNSTCW).
+logic        x87_quiet;            // No x87 command in the bridge, queued or running.
+logic        x87_quiet_r;          // ...nor in the x87 unit, last cycle.
+logic [15:0] status_word, control_word;
 logic  [1:0] st_parts_r;           // Result parts of the store.
 logic  [1:0] st_taken_r;           // ...taken from the x87 so far.
 logic [31:0] st_part0_r;           // The part for OPR_R...
@@ -131,7 +147,7 @@ logic        st_commit_r;          // OPR_R takes st_part0_r: ST_DONE's first
                                    // cycle, and the cycle after an X87_NEXT word.
 wire         st_cmd = direct_st_r && store_go && !cancel &&
                       (st_state == ST_IDLE || st_state == ST_CMD);
-wire         result_pop = (st_state == ST_READ);
+wire         result_pop = (st_state == ST_READ) && !st_status_r;
 logic        result_valid;
 logic [31:0] result_data;
 wire         dcmd_sel = dcmd_pending_r || st_cmd;    // a command write (F8)
@@ -144,7 +160,7 @@ assign load_commit = direct_release;
 assign direct_mem_req = direct_active && !direct_issued_r && !direct_data_valid_r;
 assign store_hold = direct_st_r && store_word && (st_state != ST_DONE);
 assign store_opr_commit = st_commit_r;
-assign store_record = st_commit_r && (st_state == ST_DONE);
+assign store_record = st_commit_r && (st_state == ST_DONE) && !st_status_r;
 assign store_opr_data = st_part0_r;
 assign direct_stall = ((direct_active || op_post_r) && !direct_release) || store_hold;
 
@@ -169,6 +185,8 @@ if (ENABLE_X87) begin : gen_x87
     // command, so the coprocessor-wait microcode samples a settled protocol.
     assign busy_n = ctl_busy_n && !posted_pending;
     assign pereq  = ctl_pereq || posted_pending;
+    // control takes a command only when every earlier one has completed.
+    assign x87_quiet = cmd_ready && !cmd_valid && !posted_pending;
 
     // The direct command has the bridge to itself: no ESC routine (the only
     // source of paging's x87 cycles) runs while it waits. Paging sees neither
@@ -210,6 +228,7 @@ if (ENABLE_X87) begin : gen_x87
         .read_resp_data(read_resp_data),
         .result_pop(result_pop), .result_valid(result_valid),
         .result_data(result_data),
+        .status_out(status_word), .control_out(control_word),
         .busy_n(ctl_busy_n), .pereq(ctl_pereq), .error_n(error_n),
         .queue_safe(queue_safe), .mask_load_pending(mask_load_pending),
         .debug_state(debug_state)
@@ -219,6 +238,9 @@ end else begin : gen_no_x87
     assign req_complete = 1'b0;
     assign result_valid = 1'b0;
     assign result_data = 32'h0;
+    assign status_word = 16'h0;
+    assign control_word = 16'h0;
+    assign x87_quiet = 1'b0;
     assign br_accepted = 1'b0;
     assign br_read_complete = 1'b0;
     assign br_rdata = 32'h0;
@@ -240,6 +262,9 @@ always_ff @(posedge clk) begin
     if (!reset_n) begin
         direct_st_r         <= 1'b0;
         st_state            <= ST_IDLE;
+        st_status_r         <= 1'b0;
+        st_control_r        <= 1'b0;
+        x87_quiet_r         <= 1'b0;
         st_parts_r          <= 2'd1;
         st_taken_r          <= 2'd0;
         st_part0_r          <= 32'h0;
@@ -283,10 +308,17 @@ always_ff @(posedge clk) begin
             dcmd_pending_r <= 1'b0;
 
         st_commit_r <= 1'b0;
+        x87_quiet_r <= x87_quiet && !dcmd_pending_r;
         case (st_state)
             ST_IDLE: if (st_cmd) st_state <= br_accepted ? ST_READ : ST_CMD;
             ST_CMD:  if (br_accepted) st_state <= ST_READ;
-            ST_READ: if (result_valid) begin
+            ST_READ: if (st_status_r) begin
+                if (x87_quiet_r) begin
+                    st_part0_r  <= {16'h0, st_control_r ? control_word : status_word};
+                    st_commit_r <= 1'b1;
+                    st_state    <= ST_DONE;
+                end
+            end else if (result_valid) begin
                 case (st_taken_r)
                     2'd0:    st_part0_r <= result_data;
                     2'd1:    st_part1_r <= result_data;
@@ -310,7 +342,7 @@ always_ff @(posedge clk) begin
 
         if (direct_launch) begin
             direct_active       <= ENABLE_X87 && direct_candidate && !l_reg &&
-                                 !l_store && !l_operand && direct_allowed &&
+                                 !l_store && !l_status && !l_operand && direct_allowed &&
                                  queue_safe && !mask_load_pending;
             op_taken_r          <= ENABLE_X87 && direct_candidate && l_operand &&
                                  direct_allowed && queue_safe && !mask_load_pending;
@@ -320,16 +352,22 @@ always_ff @(posedge clk) begin
             // As the 386 routine: with every exception masked it may start
             // while the x87 is busy. A posted port write (BUSY# for it) is
             // waited out: the command enters the bridge behind it.
-            direct_st_r         <= ENABLE_X87 && direct_candidate && l_store &&
-                                 direct_allowed && error_n && (busy_n || queue_safe) &&
-                                 !dcmd_pending_r;
-            st_state            <= ST_IDLE;
+            // A status read is taken as the overlays are, with no unmasked
+            // exception pending; it then waits for the x87 to finish.
+            direct_st_r         <= ENABLE_X87 && direct_candidate && direct_allowed &&
+                                 error_n && (l_status ||
+                                             (l_store && (busy_n || queue_safe) &&
+                                              !dcmd_pending_r));
+            st_status_r         <= l_status;
+            st_control_r        <= l_esc == 3'd1;
+            st_state            <= (ENABLE_X87 && direct_candidate && direct_allowed &&
+                                    error_n && l_status) ? ST_READ : ST_IDLE;
             st_parts_r          <= l_parts;
             st_taken_r          <= 2'd0;
-            direct_reg_r        <= ENABLE_X87 && direct_candidate && l_reg &&
+            direct_reg_r        <= ENABLE_X87 && direct_candidate && l_regcmd &&
                                  direct_allowed && error_n && (busy_n || queue_safe) &&
                                  !posted_pending && !dcmd_pending_r;
-            dcmd_pending_r      <= ENABLE_X87 && direct_candidate && l_reg &&
+            dcmd_pending_r      <= ENABLE_X87 && direct_candidate && l_regcmd &&
                                  direct_allowed && error_n && (busy_n || queue_safe) &&
                                  !posted_pending && !dcmd_pending_r;
             direct_issued_r     <= 1'b0;

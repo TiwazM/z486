@@ -57,6 +57,14 @@ function automatic logic [11:0] recipe_effective_entry(
             if (modrm[7:6] != 2'b11)
                 recipe_effective_entry = 12'hA3A;
         end
+        12'h3DA: begin
+            if (modrm[7:6] == 2'b11)
+                recipe_effective_entry = 12'hA40;
+        end
+        12'h3D9: begin
+            if (modrm[7:6] != 2'b11)
+                recipe_effective_entry = 12'hA44;
+        end
         12'h04A: begin
             if (modrm[7:6] != 2'b11)
                 recipe_effective_entry = 12'h9CB;
@@ -84,6 +92,8 @@ function automatic logic [11:0] recipe_fallback_entry(input logic [11:0] entry);
         12'hA20: recipe_fallback_entry = 12'h540;
         12'hA2A: recipe_fallback_entry = 12'h538;
         12'hA3A: recipe_fallback_entry = 12'h544;
+        12'hA40: recipe_fallback_entry = 12'h3DA;
+        12'hA44: recipe_fallback_entry = 12'h3D9;
         12'h9CB: recipe_fallback_entry = 12'h04A;
         12'h9CE: recipe_fallback_entry = 12'h04E;
         default: recipe_fallback_entry = entry;
@@ -101,6 +111,8 @@ function automatic logic [1:0] recipe_action(input logic [11:0] entry);
         12'hA20: recipe_action = RECIPE_ACTION_X87_OVERLAY;
         12'hA2A: recipe_action = RECIPE_ACTION_X87_OVERLAY;
         12'hA3A: recipe_action = RECIPE_ACTION_X87_OVERLAY;
+        12'hA40: recipe_action = RECIPE_ACTION_X87_OVERLAY;
+        12'hA44: recipe_action = RECIPE_ACTION_X87_OVERLAY;
         12'h9CB: recipe_action = RECIPE_ACTION_RMW_FAST;
         12'h9CE: recipe_action = RECIPE_ACTION_RMW_FAST;
         12'h9C7: recipe_action = RECIPE_ACTION_INVLPG;
@@ -409,6 +421,14 @@ function automatic recipe_meta_t recipe_metadata(input dec_entry_t e);
                 r.commit_sel = RECIPE_ACTION_X87_DIRECT; r.uses_ea = 1'b1;
             end
             12'hA3A: begin
+                // Direct x87 transport; normal sequencer retirement.
+                r.commit_sel = RECIPE_ACTION_X87_DIRECT; r.uses_ea = 1'b1;
+            end
+            12'hA40: begin
+                // Direct x87 transport; normal sequencer retirement.
+                r.commit_sel = RECIPE_ACTION_X87_DIRECT; r.uses_ea = 1'b0;
+            end
+            12'hA44: begin
                 // Direct x87 transport; normal sequencer retirement.
                 r.commit_sel = RECIPE_ACTION_X87_DIRECT; r.uses_ea = 1'b1;
             end
