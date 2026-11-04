@@ -371,7 +371,7 @@ test-x87-core: obj_dir_x87_core/Vtb_x87_core
 
 test-x87-integration: obj_dir_x87/Vtb_protected_mode
 	@echo "Running x87-enabled CPU protocol tests..."
-	Z486_ENABLE_X87=1 Z486_TESTBENCH=$(CURDIR)/obj_dir_x87/Vtb_protected_mode ./test_protected_mode.py x87_protocol x87_env32 x87_arithmetic x87_m32_page_fault x87_heap32 x87_qemu_special x87_qemu_exceptions x87_off_sx x87_387_ops x87_trans_poly x87_trans_logexp x87_bcd_alias x87_m80_multiply x87_store_rounding x87_direct_loads x87_direct_load_faults x87_direct_load_fallback x87_direct_stores x87_direct_store_faults x87_direct_store_fallback x87_status_after x87_overlap x87_reg_wait_irq
+	Z486_ENABLE_X87=1 Z486_TESTBENCH=$(CURDIR)/obj_dir_x87/Vtb_protected_mode ./test_protected_mode.py x87_protocol x87_env32 x87_arithmetic x87_m32_page_fault x87_heap32 x87_qemu_special x87_qemu_exceptions x87_off_sx x87_387_ops x87_trans_poly x87_trans_logexp x87_bcd_alias x87_m80_multiply x87_store_rounding x87_direct_loads x87_direct_load_faults x87_direct_load_fallback x87_direct_stores x87_direct_store_faults x87_direct_store_fallback x87_status_after x87_overlap x87_reg_wait_irq x87_frndint x87_fscale x87_fprem
 
 test-x87-integer: obj_dir_x87_int/Vtb_z486
 	@echo "Running integer regressions with x87 enabled..."
