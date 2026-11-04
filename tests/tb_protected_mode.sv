@@ -594,6 +594,14 @@ module tb_protected_mode #(
     longint vipt_store_wait_issues = 0;
     longint vipt_store_replays = 0;
     reg vipt_store_replay_pending = 0;
+    // +expect_x87_operand_loads=N: at least N x87 loads queued their operand
+    // through the RD-word overlays (x87-m16/m64/m80-load) without falling back.
+    longint x87_operand_loads = 0;
+    int expect_x87_operand_loads = 0;
+    initial void'($value$plusargs("expect_x87_operand_loads=%d", expect_x87_operand_loads));
+    always @(posedge clk)
+        if (reset_n && dut.x87_load_commit && dut.x87.op_post_r)
+            x87_operand_loads <= x87_operand_loads + 1;
 
     // A load-to-AGI regression must both exercise the dependency and prevent
     // the dependent instruction from issuing while its EA input is pending.
@@ -773,12 +781,16 @@ module tb_protected_mode #(
                              (vipt_ea_interlock_cycles == 0)) ||
                             ($test$plusargs("expect_vipt_store_replay") &&
                              ((vipt_store_wait_issues == 0) ||
-                              (vipt_store_replays == 0)))) begin
+                              (vipt_store_replays == 0))) ||
+                            (x87_operand_loads < expect_x87_operand_loads)) begin
                             test_status <= 8'hFF;
                             $display("");
                             $display("========================================");
                             $display("  TEST FAILED!");
-                            if (vipt_ea_interlock_cycles == 0)
+                            if (x87_operand_loads < expect_x87_operand_loads)
+                                $display("  x87 operand-transport loads: %0d, expected %0d",
+                                         x87_operand_loads, expect_x87_operand_loads);
+                            else if (vipt_ea_interlock_cycles == 0)
                                 $display("  VIPT load-to-EA interlock was not exercised");
                             else
                                 $display("  VIPT older-store replay was not exercised");
@@ -813,6 +825,9 @@ module tb_protected_mode #(
                                 $display("  VIPT store waits/replays: %0d/%0d",
                                          vipt_store_wait_issues,
                                          vipt_store_replays);
+                            if (expect_x87_operand_loads != 0)
+                                $display("  x87 operand-transport loads: %0d",
+                                         x87_operand_loads);
                             $display("========================================");
                             test_done <= 1;
                         end
