@@ -25,3 +25,4 @@ tests/singlestep_result.txt
 # Berkeley SoftFloat/TestFloat 3e, cloned and built for run_x87_testfloat80.sh
 tests/testfloat/
 tests/x87_testfloat80_out/
+.venv/
