@@ -619,6 +619,34 @@ module tb_protected_mode #(
         if (reset_n && ((dut.x87.store_opr_commit && dut.x87.st_status_r) ||
                         (dut.x87.direct_release && dut.x87.op_ctrl_r)))
             x87_direct_control <= x87_direct_control + 1;
+    // +expect_x87_held=N: at least N x87 commands were accepted behind a
+    // running operation, held by x87_control until it retired.
+    // +expect_x87_reg_waits=N: at least N register commands held their
+    // instruction until the bridge was free to take them (a command ahead).
+    longint x87_held = 0;
+    longint x87_reg_waits = 0;
+    int expect_x87_held = 0;
+    int expect_x87_reg_waits = 0;
+    initial begin
+        void'($value$plusargs("expect_x87_held=%d", expect_x87_held));
+        void'($value$plusargs("expect_x87_reg_waits=%d", expect_x87_reg_waits));
+    end
+    generate
+    if (ENABLE_X87) begin : gen_x87_overlap_counts
+        reg x87_reg_waited = 1'b0;
+        always @(posedge clk) begin
+            if (reset_n) begin
+                if (dut.x87.gen_x87.control.core_cmd_valid &&
+                    dut.x87.gen_x87.control.core_cmd_ready &&
+                    !dut.x87.gen_x87.control.core_cmd_idle)
+                    x87_held <= x87_held + 1;
+                if (dut.x87.dcmd_pending_r && dut.x87.br_accepted && x87_reg_waited)
+                    x87_reg_waits <= x87_reg_waits + 1;
+                x87_reg_waited <= dut.x87.dcmd_wait;
+            end
+        end
+    end
+    endgenerate
 
     // A load-to-AGI regression must both exercise the dependency and prevent
     // the dependent instruction from issuing while its EA input is pending.
@@ -801,7 +829,9 @@ module tb_protected_mode #(
                               (vipt_store_replays == 0))) ||
                             (x87_operand_loads < expect_x87_operand_loads) ||
                             (x87_direct_stores < expect_x87_direct_stores) ||
-                            (x87_direct_control < expect_x87_direct_control)) begin
+                            (x87_direct_control < expect_x87_direct_control) ||
+                            (x87_held < expect_x87_held) ||
+                            (x87_reg_waits < expect_x87_reg_waits)) begin
                             test_status <= 8'hFF;
                             $display("");
                             $display("========================================");
@@ -815,6 +845,13 @@ module tb_protected_mode #(
                             else if (x87_direct_control < expect_x87_direct_control)
                                 $display("  x87 direct FNSTSW/FNSTCW/FLDCW: %0d, expected %0d",
                                          x87_direct_control, expect_x87_direct_control);
+                            else if (x87_held < expect_x87_held)
+                                $display("  x87 commands held behind a running one: %0d, expected %0d",
+                                         x87_held, expect_x87_held);
+                            else if (x87_reg_waits < expect_x87_reg_waits)
+                                $display("  x87 register commands that waited for the bridge: %0d, expected %0d",
+                                         x87_reg_waits, expect_x87_reg_waits);
+
                             else if (vipt_ea_interlock_cycles == 0)
                                 $display("  VIPT load-to-EA interlock was not exercised");
                             else
@@ -859,6 +896,13 @@ module tb_protected_mode #(
                             if (expect_x87_direct_control != 0)
                                 $display("  x87 direct FNSTSW/FNSTCW/FLDCW: %0d",
                                          x87_direct_control);
+                            if (expect_x87_held != 0)
+                                $display("  x87 commands held behind a running one: %0d",
+                                         x87_held);
+                            if (expect_x87_reg_waits != 0)
+                                $display("  x87 register commands that waited for the bridge: %0d",
+                                         x87_reg_waits);
+
                             $display("========================================");
                             test_done <= 1;
                         end
