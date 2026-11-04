@@ -250,6 +250,29 @@ typedef enum logic [2:0] {
 poly_phase_t     poly_phase;
 logic [6:0]      poly_pc;
 x87_poly_word_t  poly_word;
+// While an operation runs (POLY_WAIT), the next word is fetched: read when
+// the operation issues, its predicate checked (a word that does not run is
+// skipped) and A and B read through the scratch and constant ports the wait
+// leaves idle, both at once when one is a constant and the other is not. At
+// the operation's done the next one issues at once; an operand that reads
+// the slot being written takes the executor's result. Not after CMP or RND
+// (they change the predicates and the reduction id) or the final word, and
+// not for AUX: those, and a fetch not complete at done, continue as before
+// at pf_pc.
+typedef enum logic [2:0] {
+    PF_IDLE,           // no fetch: continue at poly_pc + 1
+    PF_PRED,           // pf_word in: predicate; reads (A, and B on the other port)
+    PF_CAP1,           // A and B in
+    PF_CAPA,           // A in; B's read
+    PF_CAPB,           // B in
+    PF_READY,          // issue at done
+    PF_STOP            // AUX at pf_pc: continue there as before
+} poly_fetch_t;
+poly_fetch_t     pf_state;
+logic [6:0]      pf_pc;
+x87_poly_word_t  pf_word;
+x87_reg_t        pf_opa;
+x87_reg_t        pf_opb;
 logic [1:0]      poly_quadrant;            // n mod 4 of the pi/2 reduction
 logic            poly_swap;                // atan2: |y| > |x|
 logic [1:0]      poly_id;                  // atan2: reduction table index
@@ -1138,14 +1161,31 @@ always_comb begin
         poly_wdata = v2_exec_result;
     end
 end
-// Operand reads: A while the predicate is checked, B the cycle after.
+// Operand reads: A while the predicate is checked, B the cycle after; while
+// an operation runs, the next word's (pf_word): A on its port and B on the
+// other, then B if both use one port.
+x87_poly_word_t poly_read_word;
+wire poly_fetch_reads = (poly_phase == POLY_WAIT) && (pf_state == PF_PRED);
+wire poly_read_b = (poly_phase == POLY_FETCH_B) ||
+                   ((poly_phase == POLY_WAIT) && (pf_state == PF_CAPA));
+assign poly_read_word = (poly_phase == POLY_WAIT) ? pf_word : poly_word;
+wire [5:0] poly_read_ca = poly_read_word.a_index +
+                          (poly_read_word.a_id ? {4'd0, poly_id} : 6'd0);
+wire [5:0] poly_read_cb = poly_read_word.b_index +
+                          (poly_read_word.b_id ? {4'd0, poly_id} : 6'd0);
 always_comb begin
-    if (poly_phase == POLY_FETCH_B) begin
-        poly_saddr = poly_word.b_index[3:0];
-        poly_caddr = poly_word.b_index + (poly_word.b_id ? {4'd0, poly_id} : 6'd0);
+    if (poly_read_b) begin
+        poly_saddr = poly_read_word.b_index[3:0];
+        poly_caddr = poly_read_cb;
+    end else if (poly_fetch_reads && poly_read_word.a_const) begin
+        poly_saddr = poly_read_word.b_index[3:0];
+        poly_caddr = poly_read_ca;
+    end else if (poly_fetch_reads) begin
+        poly_saddr = poly_read_word.a_index[3:0];
+        poly_caddr = poly_read_cb;
     end else begin
-        poly_saddr = poly_word.a_index[3:0];
-        poly_caddr = poly_word.a_index + (poly_word.a_id ? {4'd0, poly_id} : 6'd0);
+        poly_saddr = poly_read_word.a_index[3:0];
+        poly_caddr = poly_read_ca;
     end
 end
 always_ff @(posedge clk) begin
@@ -1158,6 +1198,48 @@ x87_reg_t poly_opb_read;
 x87_reg_t poly_opa_read;
 logic [2:0] poly_round_low3;               // n mod 8 of the RND result's magnitude
 assign poly_opb_read = poly_word.b_const ? poly_const_q : poly_scratch_q;
+x87_reg_t pf_opa_read, pf_opb_read;
+assign pf_opa_read = pf_word.a_const ? poly_const_q : poly_scratch_q;
+assign pf_opb_read = pf_word.b_const ? poly_const_q : poly_scratch_q;
+// The fetched word reads the slot the running operation writes at done.
+wire pf_forward_a = !pf_word.a_const && (pf_word.a_index[3:0] == poly_word.dest);
+wire pf_forward_b = !pf_word.b_const && (pf_word.b_index[3:0] == poly_word.dest);
+function automatic x87_reg_t poly_a_sign(input x87_reg_t value, input x87_poly_word_t word);
+    x87_reg_t r;
+    r = value;
+    if (word.a_abs)
+        r.sign = 1'b0;
+    else if (word.a_neg)
+        r.sign = !value.sign;
+    return r;
+endfunction
+function automatic x87_reg_t poly_b_sign(input x87_reg_t value, input x87_poly_word_t word);
+    x87_reg_t r;
+    r = value;
+    if (word.b_abs)
+        r.sign = 1'b0;
+    return r;
+endfunction
+function automatic x87_exec_op_t poly_exec_op(input logic [2:0] op);
+    case (op)
+        X87_POLY_OP_ADD: return X87_ARITH_ADD;
+        X87_POLY_OP_SUB: return X87_ARITH_SUB;
+        X87_POLY_OP_DIV: return X87_ARITH_DIV;
+        X87_POLY_OP_RND: return X87_CONVERT_FRNDINT;
+        X87_POLY_OP_CMP: return X87_ARITH_COMPARE;
+        default:         return X87_ARITH_MUL;
+    endcase
+endfunction
+// A word after which the next one is fetched while it runs.
+function automatic logic poly_fetch_behind(input x87_poly_word_t word);
+    return !word.final_op && (word.op != X87_POLY_OP_CMP) &&
+           (word.op != X87_POLY_OP_RND);
+endfunction
+// The word after the one issuing (ISSUE) or after pf_word (issue at done, a
+// skipped word), read as an operation issues.
+wire [6:0] pf_next_pc = (poly_phase == POLY_ISSUE) ? poly_pc + 7'd1 : pf_pc + 7'd1;
+x87_poly_word_t pf_next_word;
+assign pf_next_word = x87_poly_word_t'(x87_poly_word(pf_next_pc));
 assign poly_opa_read = poly_word.a_const ? poly_const_q : poly_scratch_q;
 assign poly_round_low3 = x87_integer_low3(v2_exec_result);
 
@@ -1299,6 +1381,11 @@ always_ff @(posedge clk) begin
         poly_phase <= POLY_IDLE;
         poly_pc <= 7'd0;
         poly_word <= '0;
+        pf_state <= PF_IDLE;
+        pf_pc <= 7'd0;
+        pf_word <= '0;
+        pf_opa <= x87_empty();
+        pf_opb <= x87_empty();
         poly_quadrant <= 2'd0;
         poly_swap <= 1'b0;
         poly_id <= 2'd0;
@@ -1882,6 +1969,7 @@ always_ff @(posedge clk) begin
             poly_final <= 1'b0;
             poly_denormal <= v2_exec_denormal_operand;
             command_complete_pulse <= 1'b0;
+            pf_state <= PF_IDLE;
         end
         case (poly_phase)
             POLY_LOAD_B: poly_phase <= POLY_DECODE;
@@ -1916,20 +2004,16 @@ always_ff @(posedge clk) begin
                     arith_operand_b <= poly_opb_read;
                     if (poly_word.b_abs)
                         arith_operand_b.sign <= 1'b0;
-                    case (poly_word.op)
-                        X87_POLY_OP_ADD: v2_exec_op <= X87_ARITH_ADD;
-                        X87_POLY_OP_SUB: v2_exec_op <= X87_ARITH_SUB;
-                        X87_POLY_OP_DIV: v2_exec_op <= X87_ARITH_DIV;
-                        X87_POLY_OP_RND: v2_exec_op <= X87_CONVERT_FRNDINT;
-                        X87_POLY_OP_CMP: v2_exec_op <= X87_ARITH_COMPARE;
-                        default:         v2_exec_op <= X87_ARITH_MUL;
-                    endcase
+                    v2_exec_op <= poly_exec_op(poly_word.op);
                     v2_exec_owner <= EXEC_MATH;
                     v2_exec_size <= 2'd0;
                     v2_exec_transfer <= 64'h0;
                     v2_exec_pending <= 1'b1;
                     poly_final <= poly_word.final_op;
                     poly_phase <= POLY_WAIT;
+                    pf_pc <= pf_next_pc;
+                    pf_word <= pf_next_word;
+                    pf_state <= poly_fetch_behind(poly_word) ? PF_PRED : PF_IDLE;
                 end
             end
             POLY_WAIT: begin
@@ -1937,6 +2021,25 @@ always_ff @(posedge clk) begin
                     if (poly_final) begin
                         poly_final <= 1'b0;
                         poly_phase <= POLY_IDLE;
+                        pf_state <= PF_IDLE;
+                    end else if (pf_state == PF_READY) begin
+                        // The fetched word issues now (the scratch takes
+                        // this result in the same cycle).
+                        poly_word <= pf_word;
+                        poly_pc <= pf_pc;
+                        arith_operand_a <= pf_forward_a
+                            ? poly_a_sign(v2_exec_result, pf_word) : pf_opa;
+                        arith_operand_b <= pf_forward_b
+                            ? poly_b_sign(v2_exec_result, pf_word) : pf_opb;
+                        v2_exec_op <= poly_exec_op(pf_word.op);
+                        v2_exec_owner <= EXEC_MATH;
+                        v2_exec_size <= 2'd0;
+                        v2_exec_transfer <= 64'h0;
+                        v2_exec_pending <= 1'b1;
+                        poly_final <= pf_word.final_op;
+                        pf_pc <= pf_next_pc;
+                        pf_word <= pf_next_word;
+                        pf_state <= poly_fetch_behind(pf_word) ? PF_PRED : PF_IDLE;
                     end else begin
                         if (poly_word.op == X87_POLY_OP_CMP) begin
                             if (poly_word.setp == X87_POLY_SETP_SWAP)
@@ -1948,9 +2051,40 @@ always_ff @(posedge clk) begin
                             poly_quadrant <= v2_exec_result.sign
                                 ? 2'd0 - poly_round_low3[1:0]
                                 : poly_round_low3[1:0];
-                        poly_pc <= poly_pc + 7'd1;
+                        // Words the fetch skipped do not run.
+                        poly_pc <= (pf_state == PF_IDLE) ? poly_pc + 7'd1 : pf_pc;
                         poly_phase <= POLY_DECODE;
+                        pf_state <= PF_IDLE;
                     end
+                end else begin
+                    case (pf_state)
+                        PF_PRED: begin
+                            if (!x87_poly_pred(pf_word.pred, poly_quadrant, poly_cosine,
+                                               poly_swap, poly_xneg, poly_yneg)) begin
+                                pf_pc <= pf_next_pc;
+                                pf_word <= pf_next_word;
+                            end else if (pf_word.op == X87_POLY_OP_AUX) begin
+                                pf_state <= PF_STOP;
+                            end else begin
+                                pf_state <= (pf_word.a_const != pf_word.b_const)
+                                            ? PF_CAP1 : PF_CAPA;
+                            end
+                        end
+                        PF_CAP1: begin
+                            pf_opa <= poly_a_sign(pf_opa_read, pf_word);
+                            pf_opb <= poly_b_sign(pf_opb_read, pf_word);
+                            pf_state <= PF_READY;
+                        end
+                        PF_CAPA: begin
+                            pf_opa <= poly_a_sign(pf_opa_read, pf_word);
+                            pf_state <= PF_CAPB;
+                        end
+                        PF_CAPB: begin
+                            pf_opb <= poly_b_sign(pf_opb_read, pf_word);
+                            pf_state <= PF_READY;
+                        end
+                        default: ;
+                    endcase
                 end
             end
             default: ;
