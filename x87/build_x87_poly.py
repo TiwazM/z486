@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Generate the x87 transcendental programs (x87_poly_rom.svh).
 
-FSIN, FCOS, FSINCOS, FPTAN and FPATAN run as short programs of the
-executor's own operations (multiply, add, subtract, divide, round to
-integer, compare), sequenced by x87_control's polynomial engine. Each
-operation rounds to the executor's 53-bit significand, round to nearest;
-the last one rounds per the control word. The engine holds temporaries in a
-16-entry scratch and reads constants from a 64-entry table.
+FSIN, FCOS, FSINCOS, FPTAN, FPATAN, F2XM1, FYL2X and FYL2XP1 run as short
+programs of the executor's own operations (multiply, add, subtract, divide,
+round to integer, compare), sequenced by x87_control's polynomial engine. Each
+operation rounds to the executor's 53-bit significand, round to nearest; the
+last one rounds per the control word. The engine holds temporaries in a
+16-entry scratch and reads constants from a 128-entry table. An operand can
+be truncated to its top 13 significand bits (a product of it with a constant
+of up to 40 bits is exact), and XTR splits a positive number into 2^k * m in
+control logic (no executor operation).
 
   sin/cos: Cody-Waite reduction by pi/2 in four parts (n * part exact for
            |n| < 2^20), then the fdlibm kernels __kernel_sin/__kernel_cos;
@@ -14,10 +17,28 @@ the last one rounds per the control word. The engine holds temporaries in a
   atan2:   t = min(|y|,|x|) / max(|y|,|x|), fdlibm's atan reduction
            (thresholds 7/16 and 11/16, c = 0, 1/2, 1), its polynomial, then
            pi/2 - r when |y| > |x|, pi - r when x < 0, and y's sign.
+  2^x - 1: k = 0 for |x| < 1/2, else k = +-1 (a compare), f = x - k exact;
+           2^f - 1 = h + T, h = trunc(f) * ln2_hi exact,
+           T = f^2 * Q(f) + ((f - trunc(f)) * ln2_hi + f * ln2_lo), Q a
+           degree-10 fit of (2^f - 1 - f ln2) / f^2 on [-1/2, 1/2]. k = 1 as fdlibm's
+           expm1: 2 * ((h + 1/2) + T) for h < -1/4, else 1 + 2 * (h + T);
+           k = -1: (h + T) / 2 - 1/2. |x| < 2^-60: x * ln2 (one rounding).
+  y*log2(x): x = 2^k * m with sqrt(1/2) <= m < sqrt(2) (XTR), f = m - 1
+           exact; fdlibm's log kernel (s = f / (2 + f), R(s^2) with Lg1..Lg7)
+           and e_log2's split: hi = f - f^2/2 truncated to 13 bits, lo the
+           rest, log2(m) = LH + LL with LH = hi * ivln2_hi exact. For k != 0,
+           LH becomes k + LH rounded to 2^-25 (summed exactly through
+           2^27 + 2^15 + k, which XTR builds) and the remainder joins LL.
+           Then y * (LH + LL) = trunc(y) * LH (exact) + ((y - trunc(y)) * LH
+           + y * LL), one final rounding.
+  y*log2(1+x): FYL2XP1 with |x| < 1 - sqrt(2)/2 (Intel's domain) runs the
+           log kernel on f = x (k = 0), never forming 1 + x; outside it
+           (undefined on Intel) FYL2X of 1 + x. |x| < 2^-60:
+           log2(1 + x) = x / ln2 in the same hi/lo form.
 
-The script also runs both programs on double-precision inputs (the executor
-rounds as IEEE double within double's range) against mpmath and fails if the
-error exceeds the limit.
+The script models every program exactly (53-bit round-to-nearest operations
+with an unbounded exponent, as the executor computes within its range),
+checks them against mpmath and fails if an error exceeds the limit.
 """
 
 from __future__ import annotations
@@ -26,10 +47,10 @@ import argparse
 import math
 import random
 import struct
-from fractions import Fraction
 from pathlib import Path
 
 import mpmath
+from mpmath import libmp
 
 mpmath.mp.prec = 200
 
@@ -93,6 +114,29 @@ ATAN_TABLES = {
     "D": [hilo(PIO2 + a) for a in ATAN_C],
 }
 
+LN2 = mpmath.log(2)
+IVLN2 = 1 / LN2
+# 2^f - 1: ln2 = LN2HI (40 bits: trunc(f) * LN2HI is exact) + LN2LO.
+LN2HI = trunc_bits(LN2, 40)
+LN2LO = rn(LN2 - LN2HI)
+# E2..E12: mpmath.chebyfit of (2^f - 1 - f * (LN2HI + LN2LO)) / f^2 on
+# [-1/2, 1/2], degree 10 (fit error 2^-60.4; 2^-56.9 relative to 2^f - 1
+# with the coefficients rounded).
+E = [h2d(v) for v in (0x3FCEBFBDFF82C58F, 0x3FAC6B08D704A0C2, 0x3F83B2AB6FBA4E78,
+                      0x3F55D87FE78A5276, 0x3F2430912F86BF52, 0x3EEFFCBFC670DCD4,
+                      0x3EB62C022401B97D, 0x3E7B524FAE627834, 0x3E3E4CF1CD08D4B8,
+                      0x3DFE9D3FE3952179, 0x3DBC48F769AD2C46)]
+# fdlibm e_log.c's Lg1..Lg7.
+LG = [h2d(v) for v in (0x3FE5555555555593, 0x3FD999999997FA04, 0x3FD2492494229359,
+                       0x3FCC71C51D8E78AF, 0x3FC7466496CB03DE, 0x3FC39A09D078C69F,
+                       0x3FC2F112DF3E5244)]
+# 1/ln2 = IVLN2HI (27 bits: a 13-bit hi times it is exact) + IVLN2LO.
+IVLN2HI = trunc_bits(IVLN2, 27)
+IVLN2LO = rn(IVLN2 - IVLN2HI)
+# XTR's sum constant: N = 2^27 + 2^15 + k has ulp 2^-25.
+KBASE = 2.0**27 + 2.0**15
+SQRT2_SIG = int(mpmath.floor(mpmath.sqrt(2) * 2**52))   # m >= sqrt(2) halves
+
 CONSTS: list[tuple[str, float]] = [
     ("TWO_OVER_PI", rn(2 / PI)),
     ("P1", P1), ("P2", P2), ("P3", P3), ("P4", P4),
@@ -105,31 +149,43 @@ CONSTS: list[tuple[str, float]] = [
     *[(f"HI{q}{i}", hl[0]) for q, tab in ATAN_TABLES.items() for i, hl in enumerate(tab)],
     *[(f"LO{q}{i}", hl[1]) for q, tab in ATAN_TABLES.items() for i, hl in enumerate(tab)],
     *[(f"AT{i}", v) for i, v in enumerate(AT)],
+    # F2XM1, FYL2X, FYL2XP1
+    ("TWO", 2.0), ("MQUARTER", -0.25),
+    ("LN2", rn(LN2)), ("LN2HI", LN2HI), ("LN2LO", LN2LO),
+    *[(f"E{i + 2}", v) for i, v in enumerate(E)],
+    *[(f"LG{i + 1}", v) for i, v in enumerate(LG)],
+    ("IVLN2", rn(IVLN2)), ("IVLN2HI", IVLN2HI), ("IVLN2LO", IVLN2LO),
+    ("KBASE", KBASE), ("LOG1P_LIM", rn(1 - mpmath.sqrt(2) / 2)),
 ]
 CONST_INDEX = {name: i for i, (name, _) in enumerate(CONSTS)}
-assert len(CONSTS) <= 64
+CONST_BITS = 7
+assert len(CONSTS) <= 1 << CONST_BITS
 
 # --------------------------------------------------------------------------
 # Program
 # --------------------------------------------------------------------------
 
-OPS = {"MUL": 0, "ADD": 1, "SUB": 2, "DIV": 3, "RND": 4, "CMP": 5, "AUX": 6}
+OPS = {"MUL": 0, "ADD": 1, "SUB": 2, "DIV": 3, "RND": 4, "CMP": 5, "AUX": 6, "XTR": 7}
 PREDS = ["ALWAYS", "Q0", "Q1", "Q2", "Q3", "Q0S", "Q1S", "Q2S", "Q3S",
-         "Q0C", "Q1C", "Q2C", "Q3C", "SWAP", "NOSWAP", "YNEG", "QA", "QB", "QC", "QD"]
+         "Q0C", "Q1C", "Q2C", "Q3C", "SWAP", "NOSWAP", "YNEG", "QA", "QB", "QC", "QD",
+         "QA0", "QA1", "KNZ"]
 PRED = {name: i for i, name in enumerate(PREDS)}
 SETP = {"NONE": 0, "SWAP": 1, "ID1": 2, "ID2": 3}   # CMP: SWAP = a < b, IDn = a >= b
 SLOTS = ["IN_A", "IN_B", "N", "R", "Z", "T1", "P", "Q", "S", "C", "H",
          "T", "U", "V", "W", "A2"]
 SLOT = {name: i for i, name in enumerate(SLOTS)}
 assert not set(SLOTS) & {name for name, _ in CONSTS}, "slot and constant names overlap"
+TRUNC_BITS = 13                 # a_trunc/b_trunc keep sig[52:40]
 
 
 class Op:
     def __init__(self, op, a=None, b=None, dest="T1", pred="ALWAYS", final=False,
-                 setp="NONE", a_neg=False, a_abs=False, b_abs=False, a_id=False, b_id=False):
+                 setp="NONE", a_neg=False, a_abs=False, b_abs=False, a_id=False, b_id=False,
+                 a_trunc=False, b_trunc=False):
         self.op, self.a, self.b, self.dest = op, a, b, dest
         self.pred, self.final, self.setp = pred, final, setp
         self.a_neg, self.a_abs, self.b_abs, self.a_id, self.b_id = a_neg, a_abs, b_abs, a_id, b_id
+        self.a_trunc, self.b_trunc = a_trunc, b_trunc
 
 
 def horner(acc: str, var: str, coeffs: list[str]) -> list[Op]:
@@ -205,8 +261,99 @@ ATAN = [
     Op("MUL", "R", "ONE", final=True),
 ]
 
-PROGRAM = SINCOS + ATAN
-ATAN_ENTRY = len(SINCOS)
+# F2XM1: IN_A = IN_B = x, 2^-60 <= |x| < 1 (x87_executor classifies the rest);
+# xneg = x < 0. f = x - k overwrites IN_A.
+EXP = [
+    Op("CMP", "IN_A", "HALF", None, setp="SWAP", a_abs=True),       # swap: k = 0
+    Op("SUB", "IN_A", "ONE", "IN_A", pred="QA"),                     # k = 1
+    Op("ADD", "IN_A", "ONE", "IN_A", pred="QC"),                     # k = -1
+    Op("SUB", "IN_A", "IN_A", "V", b_trunc=True),                    # f - trunc(f)
+    *horner("P", "IN_A", [f"E{i}" for i in range(2, 13)]),
+    Op("MUL", "P", "IN_A", "P"),
+    Op("MUL", "P", "IN_A", "P"),                                     # f^2 Q(f)
+    Op("MUL", "V", "LN2HI", "V"),
+    Op("MUL", "IN_A", "LN2LO", "W"),
+    Op("ADD", "V", "W", "V"),
+    Op("ADD", "P", "V", "T"),                                        # T
+    Op("MUL", "IN_A", "LN2HI", "H", a_trunc=True),                   # h (exact)
+    Op("ADD", "H", "T", pred="SWAP", final=True),
+    Op("ADD", "H", "T", "W", pred="QC"),
+    Op("MUL", "W", "HALF", "W", pred="QC"),
+    Op("SUB", "W", "HALF", pred="QC", final=True),
+    Op("CMP", "H", "MQUARTER", None, setp="ID1", pred="QA"),         # id: h >= -1/4
+    Op("ADD", "H", "HALF", "W", pred="QA0"),
+    Op("ADD", "W", "T", "W", pred="QA0"),
+    Op("MUL", "W", "TWO", pred="QA0", final=True),
+    Op("ADD", "H", "T", "W", pred="QA1"),
+    Op("MUL", "W", "TWO", "W", pred="QA1"),
+    Op("ADD", "W", "ONE", pred="QA1", final=True),
+]
+EXP_TINY = [Op("MUL", "IN_A", "LN2", final=True)]                   # |x| < 2^-60
+
+# FYL2X / FYL2XP1: IN_A = y (ST1), IN_B = x (ST0). The kernel takes f in IN_B.
+LOG = [
+    # FYL2XP1: |x| < 1 - sqrt(2)/2 keeps f = x (k = 0); else FYL2X of 1 + x.
+    Op("CMP", "IN_B", "LOG1P_LIM", None, setp="SWAP", a_abs=True),
+    Op("ADD", "IN_B", "ONE", "IN_B", pred="NOSWAP"),
+    # FYL2X: C = m, N = 2^27 + 2^15 + k; f = m - 1.
+    Op("XTR", "IN_B", "N", "C", pred="NOSWAP"),
+    Op("SUB", "C", "ONE", "IN_B", pred="NOSWAP"),
+    # s = f/(2 + f), z = s^2, R = z*(Lg1 + z*(Lg2 + ... + z*Lg7))
+    Op("ADD", "IN_B", "TWO", "T1"),
+    Op("DIV", "IN_B", "T1", "S"),
+    Op("MUL", "S", "S", "Z"),
+    *horner("R", "Z", [f"LG{i}" for i in range(1, 8)]),
+    Op("MUL", "R", "Z", "R"),
+    # hfsq = f^2/2, r = s*(hfsq + R): log(1 + f) = f - hfsq + r
+    Op("MUL", "IN_B", "HALF", "H"), Op("MUL", "H", "IN_B", "H"),
+    Op("ADD", "H", "R", "T1"), Op("MUL", "S", "T1", "T1"),
+    # hi = trunc(f - hfsq), lo = (f - hi) - hfsq + r
+    Op("SUB", "IN_B", "H", "U"),
+    Op("SUB", "IN_B", "U", "V", b_trunc=True),
+    Op("SUB", "V", "H", "V"), Op("ADD", "V", "T1", "V"),
+    # LH = hi*IVLN2HI (exact), LL = lo/ln2 + hi*IVLN2LO
+    Op("MUL", "U", "IVLN2HI", "P", a_trunc=True),
+    Op("MUL", "V", "IVLN2", "V"),
+    Op("MUL", "U", "IVLN2LO", "W", a_trunc=True),
+    Op("ADD", "V", "W", "Q"),
+    # k != 0: LH = k + LH rounded to 2^-25, the rest into LL.
+    Op("ADD", "N", "P", "T", pred="KNZ"),
+    Op("SUB", "N", "T", "W", pred="KNZ"),
+    Op("ADD", "W", "P", "W", pred="KNZ"),
+    Op("ADD", "W", "Q", "Q", pred="KNZ"),
+    Op("SUB", "T", "KBASE", "P", pred="KNZ"),
+]
+# y*(LH + LL) = trunc(y)*LH (exact) + ((y - trunc(y))*LH + y*LL)
+Y_TAIL = [
+    Op("SUB", "IN_A", "IN_A", "T", b_trunc=True),
+    Op("MUL", "T", "P", "T"),
+    Op("MUL", "IN_A", "Q", "W"),
+    Op("ADD", "T", "W", "T"),
+    Op("MUL", "IN_A", "P", "W", a_trunc=True),
+    Op("ADD", "W", "T", final=True),
+]
+LOG += Y_TAIL
+# FYL2XP1, |x| < 2^-60: log2(1 + x) = x/ln2: hi = trunc(x), lo = x - hi.
+LOG1P_TINY = [
+    Op("SUB", "IN_B", "IN_B", "V", b_trunc=True),
+    Op("MUL", "IN_B", "IVLN2HI", "P", a_trunc=True),
+    Op("MUL", "V", "IVLN2", "V"),
+    Op("MUL", "IN_B", "IVLN2LO", "W", a_trunc=True),
+    Op("ADD", "V", "W", "Q"),
+    *Y_TAIL,
+]
+
+ENTRIES = {}
+PROGRAM: list[Op] = []
+for _name, _prog in (("SINCOS", SINCOS), ("ATAN", ATAN), ("EXP", EXP), ("EXP_TINY", EXP_TINY),
+                     ("LOG1P", LOG), ("LOG1P_TINY", LOG1P_TINY)):
+    ENTRIES[_name] = len(PROGRAM)
+    PROGRAM += _prog
+ENTRIES["LOG"] = ENTRIES["LOG1P"] + 2                # FYL2X: at XTR
+assert PROGRAM[ENTRIES["LOG"]].op == "XTR"
+PC_BITS = 8
+assert len(PROGRAM) <= 1 << PC_BITS
+ATAN_ENTRY = ENTRIES["ATAN"]
 
 
 def operand(name: str | None) -> tuple[int, int]:
@@ -218,37 +365,108 @@ def operand(name: str | None) -> tuple[int, int]:
     return 1, CONST_INDEX[name]
 
 
+FIELDS = [  # name, width, comment
+    ("op", 3, "X87_POLY_OP_*"),
+    ("final_op", 1, "last operation: rounds per the control word"),
+    ("a_const", 1, "A from the constant table (else scratch)"),
+    ("a_index", CONST_BITS, ""),
+    ("a_id", 1, "add the atan reduction id to A's constant index"),
+    ("a_neg", 1, ""),
+    ("a_abs", 1, ""),
+    ("a_trunc", 1, f"A's significand cut to its top {TRUNC_BITS} bits"),
+    ("b_const", 1, ""),
+    ("b_index", CONST_BITS, "XTR: the slot written with 2^27 + 2^15 + k"),
+    ("b_id", 1, ""),
+    ("b_abs", 1, ""),
+    ("b_trunc", 1, ""),
+    ("dest", 4, "scratch slot written with the result"),
+    ("pred", 5, "run only when the predicate holds"),
+    ("setp", 2, "CMP: 1 swap = A < B, 2/3 id += A >= B"),
+]
+WORD_BITS = sum(w for _, w, _ in FIELDS)
+
+
 def encode(o: Op) -> int:
     a_c, a_i = operand(o.a)
     b_c, b_i = operand(o.b)
-    dest = SLOT[o.dest] if o.dest else 0
+    values = {
+        "op": OPS[o.op], "final_op": int(o.final), "a_const": a_c, "a_index": a_i,
+        "a_id": int(o.a_id), "a_neg": int(o.a_neg), "a_abs": int(o.a_abs),
+        "a_trunc": int(o.a_trunc), "b_const": b_c, "b_index": b_i, "b_id": int(o.b_id),
+        "b_abs": int(o.b_abs), "b_trunc": int(o.b_trunc),
+        "dest": SLOT[o.dest] if o.dest else 0, "pred": PRED[o.pred], "setp": SETP[o.setp],
+    }
     word = 0
-    for value, width in ((OPS[o.op], 3), (int(o.final), 1), (a_c, 1), (a_i, 6), (int(o.a_id), 1),
-                         (int(o.a_neg), 1), (int(o.a_abs), 1), (b_c, 1), (b_i, 6), (int(o.b_id), 1),
-                         (int(o.b_abs), 1), (dest, 4), (PRED[o.pred], 5), (SETP[o.setp], 2)):
-        assert 0 <= value < (1 << width)
-        word = (word << width) | value
+    for name, width, _ in FIELDS:
+        assert 0 <= values[name] < (1 << width), (name, values[name])
+        word = (word << width) | values[name]
     return word
 
 
-WORD_BITS = 3 + 1 + 1 + 6 + 1 + 1 + 1 + 1 + 6 + 1 + 1 + 4 + 5 + 2
-
 # --------------------------------------------------------------------------
-# Emulation (IEEE double, round to nearest; the executor matches within
-# double's exponent range)
+# Model: 53-bit round-to-nearest-even operations with an unbounded exponent
+# (the executor's arithmetic within its range). Values are mpf; the model has
+# no signed zero (no program result is zero).
 # --------------------------------------------------------------------------
 
+MPF = mpmath.mpf
+_LIBOP = {"MUL": libmp.mpf_mul, "ADD": libmp.mpf_add, "SUB": libmp.mpf_sub, "DIV": libmp.mpf_div}
 
-def run(prog: list[Op], entry: int, a: float, b: float, cosine: bool):
+
+def r53(v) -> MPF:
+    return MPF(libmp.mpf_pos(MPF(v)._mpf_, 53, "n"))
+
+
+def op53(op: str, x: MPF, y: MPF) -> MPF:
+    return MPF(_LIBOP[op](x._mpf_, y._mpf_, 53, "n"))
+
+
+def op_exact(op: str, x: MPF, y: MPF) -> MPF:
+    if op == "DIV":
+        return MPF(libmp.mpf_div(x._mpf_, y._mpf_, 400, "n"))
+    return MPF(_LIBOP[op](x._mpf_, y._mpf_, 0))
+
+
+def sig_exp(v: MPF) -> tuple[int, int, int]:
+    """(sign, 53-bit significand, unbiased exponent) of a nonzero value with <= 53 bits."""
+    s, man, exp, bc = v._mpf_
+    assert man and bc <= 53, v
+    return s, man << (53 - bc), exp + bc - 1
+
+
+def trunc13(v: MPF) -> MPF:
+    if v == 0:
+        return v
+    s, sig, e = sig_exp(v)
+    sig &= ~((1 << (53 - TRUNC_BITS)) - 1)
+    return MPF(libmp.from_man_exp(-sig if s else sig, e - 52))
+
+
+def xtr(v: MPF) -> tuple[MPF, int, bool]:
+    """x87_control's XTR: x = 2^k * m, sqrt(1/2) <= m < sqrt(2); exact = (m == 1)."""
+    s, sig, e = sig_exp(v)
+    assert not s
+    ge = sig >= SQRT2_SIG
+    m = MPF(libmp.from_man_exp(sig, -52 - int(ge)))
+    return m, e + int(ge), sig == 1 << 52
+
+
+def run(prog: list[Op], entry: int, a, b, cosine: bool = False):
+    """Run from `entry` with IN_A = a, IN_B = b (and xneg = b < 0, yneg = a < 0).
+    Returns (result, aux, c1, pe): c1 = the final rounding went up in
+    magnitude; pe = the precision exception x87_control reports: always, but
+    when XTR found m = 1 (x a power of two) only if the final rounding was
+    inexact."""
+    a, b = MPF(a), MPF(b)
     slots = {"IN_A": a, "IN_B": b}
-    const = dict(CONSTS)
-    swap = idn = 0
-    quad = 0
-    xneg, yneg = b < 0 or (b == 0 and math.copysign(1, b) < 0), a < 0
+    const = {name: MPF(v) for name, v in CONSTS}
+    swap = idn = quad = 0
+    k0, exact = True, False
+    xneg, yneg = b < 0, a < 0
     aux = None
     pc = entry
 
-    def fetch(name, neg=False, absv=False, use_id=False):
+    def fetch(name, neg=False, absv=False, use_id=False, trunc=False):
         if name in SLOT:
             v = slots[name]
         else:
@@ -256,6 +474,8 @@ def run(prog: list[Op], entry: int, a: float, b: float, cosine: bool):
                 base = name[:-1]
                 name = f"{base}{int(name[-1]) + idn}"
             v = const[name]
+        if trunc:
+            v = trunc13(v)
         if absv:
             v = abs(v)
         if neg:
@@ -265,21 +485,27 @@ def run(prog: list[Op], entry: int, a: float, b: float, cosine: bool):
     while True:
         o = prog[pc]
         pc += 1
-        p = o.pred
-        q = quad
+        qa = not swap and not xneg
         ok = {"ALWAYS": True, "SWAP": swap == 1, "NOSWAP": swap == 0, "YNEG": yneg,
-              "QA": not swap and not xneg, "QB": swap and not xneg,
-              "QC": not swap and xneg, "QD": swap and xneg}
+              "QA": qa, "QB": swap and not xneg,
+              "QC": not swap and xneg, "QD": swap and xneg,
+              "QA0": qa and idn == 0, "QA1": qa and idn != 0, "KNZ": not k0}
         for k in range(4):
-            ok[f"Q{k}"] = q == k
-            ok[f"Q{k}S"] = q == k and not cosine
-            ok[f"Q{k}C"] = q == k and cosine
-        if not ok[p]:
+            ok[f"Q{k}"] = quad == k
+            ok[f"Q{k}S"] = quad == k and not cosine
+            ok[f"Q{k}C"] = quad == k and cosine
+        if not ok[o.pred]:
             continue
-        x = fetch(o.a, o.a_neg, o.a_abs, o.a_id)
-        y = fetch(o.b, False, o.b_abs, o.b_id) if o.b else None
+        x = fetch(o.a, o.a_neg, o.a_abs, o.a_id, o.a_trunc)
+        y = fetch(o.b, False, o.b_abs, o.b_id, o.b_trunc) if o.b and o.op != "XTR" else None
         if o.op == "AUX":
             aux = x
+            continue
+        if o.op == "XTR":
+            m, k, exact = xtr(x)
+            slots[o.dest] = m
+            slots[o.b] = MPF(KBASE + k)
+            k0 = k == 0
             continue
         if o.op == "CMP":
             less = x < y
@@ -288,57 +514,141 @@ def run(prog: list[Op], entry: int, a: float, b: float, cosine: bool):
             else:
                 idn += int(not less)
             continue
-        if o.op == "MUL":
-            r = x * y
-        elif o.op == "ADD":
-            r = x + y
-        elif o.op == "SUB":
-            r = x - y
-        elif o.op == "DIV":
-            r = x / y
-        elif o.op == "RND":
-            r = float(round(x))
-            n = int(r)
-            quad = n & 3
+        if o.op == "RND":
+            r = mpmath.nint(x)
+            quad = int(r) & 3
+        else:
+            r = op53(o.op, x, y)
         if o.final:
-            return r, aux
+            c1, inexact = False, True
+            if o.op != "RND":
+                ex = op_exact(o.op, x, y)
+                c1, inexact = abs(r) > abs(ex), r != ex
+            return r, aux, c1, inexact or not exact
         slots[o.dest] = r
 
 
-def ulp_error(got: float, exact) -> float:
-    exact = mpmath.mpf(exact)
+def ulp_error(got, exact) -> float:
+    exact = MPF(exact)
     if exact == 0:
         return 0.0 if got == 0 else float("inf")
     e = mpmath.floor(mpmath.log(abs(exact), 2))
-    return float(abs(mpmath.mpf(got) - exact) / mpmath.ldexp(1, int(e) - 52))
+    return float(abs(MPF(got) - exact) / mpmath.ldexp(1, int(e) - 52))
 
 
-def check(samples: int, limit: float) -> None:
+# F2XM1, FYL2X, FYL2XP1 as x87_control starts them (after x87_executor's
+# classification): the entry, and IN_A/IN_B.
+TINY = MPF(2) ** -60
+
+
+def f2xm1(x):
+    x = MPF(x)
+    return run(PROGRAM, ENTRIES["EXP_TINY" if abs(x) < TINY else "EXP"], x, x)
+
+
+def fyl2x(y, x):
+    return run(PROGRAM, ENTRIES["LOG"], y, x)
+
+
+def fyl2xp1(y, x):
+    x = MPF(x)
+    return run(PROGRAM, ENTRIES["LOG1P_TINY" if abs(x) < TINY else "LOG1P"], y, x)
+
+
+def rand53(rng: random.Random, lo_exp: float, hi_exp: float, sign: bool = True) -> MPF:
+    """A random 53-bit value with |v| = 2^U(lo_exp, hi_exp) * [1, 2)."""
+    e = math.floor(rng.uniform(lo_exp, hi_exp))
+    v = MPF(libmp.from_man_exp(rng.randrange(1 << 52, 1 << 53), e - 52))
+    return -v if sign and rng.random() < 0.5 else v
+
+
+def check(samples: int, limit: float) -> dict[str, float]:
     rng = random.Random(486)
     worst = {"sin": 0.0, "cos": 0.0, "atan2": 0.0}
     where = {}
+
+    def note(name, err, arg):
+        if err > worst.get(name, 0.0):
+            worst[name], where[name] = err, arg
+        elif name not in worst:
+            worst[name], where[name] = err, arg
+
     for i in range(samples):
         e = rng.uniform(-26, 19)                       # |x| from 2^-26 to 2^19
         x = math.copysign(2.0 ** e * rng.uniform(1, 2), rng.choice((-1, 1)))
         for name, cosine, fn in (("sin", False, mpmath.sin), ("cos", True, mpmath.cos)):
-            got, aux = run(PROGRAM, 0, x, 0.0, cosine)
-            err = ulp_error(got, fn(mpmath.mpf(x)))
-            if err > worst[name]:
-                worst[name], where[name] = err, x
+            got, aux, _, _ = run(PROGRAM, 0, x, 0.0, cosine)
+            note(name, ulp_error(got, fn(mpmath.mpf(x))), x)
             if name == "sin":
-                aerr = ulp_error(aux, mpmath.cos(mpmath.mpf(x)))
-                if aerr > worst["cos"]:
-                    worst["cos"], where["cos"] = aerr, x
+                note("cos", ulp_error(aux, mpmath.cos(mpmath.mpf(x))), x)
         y = math.copysign(2.0 ** rng.uniform(-30, 30) * rng.uniform(1, 2), rng.choice((-1, 1)))
         xx = math.copysign(2.0 ** rng.uniform(-30, 30) * rng.uniform(1, 2), rng.choice((-1, 1)))
-        got, _ = run(PROGRAM, ATAN_ENTRY, y, xx, False)
-        err = ulp_error(got, mpmath.atan2(mpmath.mpf(y), mpmath.mpf(xx)))
-        if err > worst["atan2"]:
-            worst["atan2"], where["atan2"] = err, (y, xx)
+        got, _, _, _ = run(PROGRAM, ATAN_ENTRY, y, xx, False)
+        note("atan2", ulp_error(got, mpmath.atan2(mpmath.mpf(y), mpmath.mpf(xx))), (y, xx))
+
+    # 2^x - 1 on [-1, 1]: random magnitudes, the tiny path, the k boundaries
+    # (|x| = 1/2), the k = 1 split (h = -1/4 at x ~ 0.64) and |x| near 1.
+    def exp_args():
+        for _ in range(samples):
+            yield rand53(rng, -70, 0)
+        for _ in range(samples // 4):
+            yield rand53(rng, -1, 0)
+        for c in (MPF(0.5), MPF(1), MPF("0.6393"), MPF("0.6394")):
+            for _ in range(samples // 8):
+                d = rand53(rng, -53, -2)
+                for v in (c + d, -(c + d)):
+                    v = r53(v)
+                    if 0 < abs(v) < 1:
+                        yield v
+    for x in exp_args():
+        got = f2xm1(x)[0]
+        note("f2xm1", ulp_error(got, mpmath.expm1(x * LN2)), x)
+
+    # y*log2(x): x over the whole range (and m80 denormals), near 1, near
+    # powers of two and sqrt(2) multiples (the k and m boundaries).
+    def log_args():
+        for _ in range(samples):
+            yield rand53(rng, -30, 30), rand53(rng, -16400, 16384, sign=False)
+        for _ in range(samples):
+            yield rand53(rng, -30, 30), rand53(rng, -40, 40, sign=False)
+        for _ in range(samples):
+            d = rand53(rng, -53, -1)
+            yield rand53(rng, -30, 30), r53(1 + d)
+        for _ in range(samples // 2):
+            k = rng.randrange(-16000, 16000)
+            d = rand53(rng, -53, -2)
+            c = MPF(2) ** k * (rng.choice((1, mpmath.sqrt(2))))
+            yield rand53(rng, -30, 30), r53(c * (1 + d))
+        for _ in range(samples // 4):                    # m80 denormal x
+            sig = rng.randrange(1, 1 << 52)
+            yield rand53(rng, -30, 30), MPF(libmp.from_man_exp(sig, -16445 + 11))
+    for y, x in log_args():
+        if x == 1:
+            continue
+        got = fyl2x(y, x)[0]
+        note("fyl2x", ulp_error(got, y * mpmath.log(x, 2)), (y, x))
+
+    # y*log2(1 + x), |x| < 1 - sqrt(2)/2: tiny, random, near the limit.
+    lim = 1 - mpmath.sqrt(2) / 2
+
+    def log1p_args():
+        for _ in range(samples):
+            yield rand53(rng, -30, 30), rand53(rng, -70, -1.77)
+        for _ in range(samples // 4):
+            yield rand53(rng, -30, 30), r53((lim - abs(rand53(rng, -53, -6))) *
+                                            rng.choice((-1, 1)))
+    for y, x in log1p_args():
+        if abs(x) >= CONSTS[CONST_INDEX["LOG1P_LIM"]][1]:
+            continue
+        got = fyl2xp1(y, x)[0]
+        note("fyl2xp1", ulp_error(got, y * mpmath.log1p(x) / LN2), (y, x))
+
     for name, err in worst.items():
-        print(f"  {name:6s} max error {err:.3f} ulp at {where.get(name)}")
+        print(f"  {name:7s} max error {err:.3f} ulp at {where.get(name)}")
+    for name, err in worst.items():
         if err > limit:
             raise SystemExit(f"{name}: {err:.3f} ulp exceeds {limit}")
+    return worst
 
 
 # --------------------------------------------------------------------------
@@ -379,14 +689,15 @@ def write_test(path: Path, count: int) -> None:
         x = math.copysign(2.0 ** rng.uniform(-20, 19) * rng.uniform(1, 2), rng.choice((-1, 1)))
         y = math.copysign(2.0 ** rng.uniform(-20, 20) * rng.uniform(1, 2), rng.choice((-1, 1)))
         if op == "FPATAN":
-            r1, _ = run(PROGRAM, ATAN_ENTRY, y, x, False)    # ST1 = y, ST0 = x
+            r1 = float(run(PROGRAM, ATAN_ENTRY, y, x, False)[0])    # ST1 = y, ST0 = x
             r2 = 0.0
         else:
-            sin_x, cos_x = run(PROGRAM, 0, x, 0.0, False)
+            sin_x, cos_x, _, _ = run(PROGRAM, 0, x, 0.0, False)
+            sin_x, cos_x = float(sin_x), float(cos_x)
             if op == "FSIN":
                 r1, r2 = sin_x, 0.0
             elif op == "FCOS":
-                r1, _ = run(PROGRAM, 0, x, 0.0, True)
+                r1 = float(run(PROGRAM, 0, x, 0.0, True)[0])
                 r2 = 0.0
             elif op == "FSINCOS":
                 r1, r2 = cos_x, sin_x                     # ST0 = cos, ST1 = sin
@@ -438,57 +749,55 @@ def main() -> None:
                     help="also write tests/programs/x87_trans_poly.asm with N cases")
     args = ap.parse_args()
 
-    print(f"program: {len(SINCOS)} sin/cos words, {len(ATAN)} atan2 words; {len(CONSTS)} constants")
+    print(f"program: {len(SINCOS)} sin/cos, {len(ATAN)} atan2, {len(EXP) + len(EXP_TINY)} 2^x-1, "
+          f"{len(LOG) + len(LOG1P_TINY)} log2 words ({len(PROGRAM)}); {len(CONSTS)} constants")
     check(args.samples, args.limit)
 
     root = Path(__file__).resolve().parent
     pred_terms = {
         "ALWAYS": "1'b1", "SWAP": "swap", "NOSWAP": "!swap", "YNEG": "yneg",
         "QA": "!swap && !xneg", "QB": "swap && !xneg", "QC": "!swap && xneg", "QD": "swap && xneg",
+        "QA0": "!swap && !xneg && (id == 2'd0)", "QA1": "!swap && !xneg && (id != 2'd0)",
+        "KNZ": "!k0",
     }
     for k in range(4):
         pred_terms[f"Q{k}"] = f"quadrant == 2'd{k}"
         pred_terms[f"Q{k}S"] = f"quadrant == 2'd{k} && !cosine"
         pred_terms[f"Q{k}C"] = f"quadrant == 2'd{k} && cosine"
+    pc, cb = PC_BITS, CONST_BITS
     lines = [
         "// Generated by build_x87_poly.py: x87 transcendental programs. Do not edit.",
         "typedef struct packed {",
-        "    logic [2:0] op;        // X87_POLY_OP_*",
-        "    logic       final_op;  // last operation: rounds per the control word",
-        "    logic       a_const;   // A from the constant table (else scratch)",
-        "    logic [5:0] a_index;",
-        "    logic       a_id;      // add the atan reduction id to A's constant index",
-        "    logic       a_neg;",
-        "    logic       a_abs;",
-        "    logic       b_const;",
-        "    logic [5:0] b_index;",
-        "    logic       b_id;",
-        "    logic       b_abs;",
-        "    logic [3:0] dest;      // scratch slot written with the result",
-        "    logic [4:0] pred;      // run only when the predicate holds",
-        "    logic [1:0] setp;      // CMP: 1 swap = A < B, 2/3 id += A >= B",
+        *[(f"    logic {'' if w == 1 else f'[{w - 1}:0]':5} {name + ';':10}" +
+           (f" // {cm}" if cm else "")).rstrip() for name, w, cm in FIELDS],
         "} x87_poly_word_t;",
         *[f"localparam logic [2:0] X87_POLY_OP_{name} = 3'd{v};" for name, v in OPS.items()],
         *[f"localparam logic [1:0] X87_POLY_SETP_{name} = 2'd{v};" for name, v in SETP.items()],
         f"localparam int X87_POLY_WORD_BITS = {WORD_BITS};",
-        f"localparam logic [6:0] X87_POLY_ENTRY_SINCOS = 7'd0;",
-        f"localparam logic [6:0] X87_POLY_ENTRY_ATAN = 7'd{ATAN_ENTRY};",
+        f"localparam int X87_POLY_PC_BITS = {pc};",
+        f"localparam int X87_POLY_CONST_BITS = {cb};",
+        *[f"localparam logic [{pc - 1}:0] X87_POLY_ENTRY_{name} = {pc}'d{v};"
+          for name, v in ENTRIES.items()],
+        f"localparam logic [52:0] X87_POLY_SQRT2_SIG = 53'h{SQRT2_SIG:x};  // XTR: m >= sqrt(2) halves",
         "",
-        f"function automatic logic [{WORD_BITS - 1}:0] x87_poly_word(input logic [6:0] address);",
+        f"function automatic logic [{WORD_BITS - 1}:0] x87_poly_word(input logic [{pc - 1}:0] address);",
         "    case (address)",
     ]
     for i, o in enumerate(PROGRAM):
-        desc = f"{o.op} {o.a or ''}{',' + o.b if o.b else ''} -> {o.dest or '-'} [{o.pred}]" + (" final" if o.final else "")
-        lines.append(f"        7'd{i}: return {WORD_BITS}'h{encode(o):0{(WORD_BITS + 3) // 4}x}; // {desc}")
+        mods = "".join(f" {m}" for m in ("a_trunc", "b_trunc") if getattr(o, m))
+        desc = (f"{o.op} {o.a or ''}{',' + o.b if o.b else ''} -> {o.dest or '-'} [{o.pred}]"
+                + (" final" if o.final else "") + mods)
+        lines.append(f"        {pc}'d{i}: return {WORD_BITS}'h{encode(o):0{(WORD_BITS + 3) // 4}x}; // {desc}")
     lines += ["        default: return '0;", "    endcase", "endfunction", "",
-              "function automatic logic [74:0] x87_poly_const(input logic [5:0] address);",
+              f"function automatic logic [74:0] x87_poly_const(input logic [{cb - 1}:0] address);",
               "    case (address)"]
     for i, (name, v) in enumerate(CONSTS):
-        lines.append(f"        6'd{i}: return 75'h{to_reg(v):019x}; // {name} = {v!r}")
+        lines.append(f"        {cb}'d{i}: return 75'h{to_reg(v):019x}; // {name} = {v!r}")
     lines += ["        default: return '0;", "    endcase", "endfunction", "",
               "function automatic logic x87_poly_pred(input logic [4:0] pred, input logic [1:0] quadrant,",
               "                                       input logic cosine, input logic swap,",
-              "                                       input logic xneg, input logic yneg);",
+              "                                       input logic xneg, input logic yneg,",
+              "                                       input logic [1:0] id, input logic k0);",
               "    case (pred)"]
     for name in PREDS:
         lines.append(f"        5'd{PRED[name]}: return {pred_terms[name]}; // {name}")
@@ -496,7 +805,8 @@ def main() -> None:
     (root / "x87_poly_rom.svh").write_text("\n".join(lines))
     print("wrote x87_poly_rom.svh")
     if args.test:
-        write_test(root.parent / "tests" / "programs" / "x87_trans_poly.asm", args.test)
+        progs = root.parent / "tests" / "programs"
+        write_test(progs / "x87_trans_poly.asm", args.test)
         print(f"wrote tests/programs/x87_trans_poly.asm ({args.test} cases)")
 
 

@@ -3,14 +3,16 @@ typedef struct packed {
     logic [2:0] op;        // X87_POLY_OP_*
     logic       final_op;  // last operation: rounds per the control word
     logic       a_const;   // A from the constant table (else scratch)
-    logic [5:0] a_index;
+    logic [6:0] a_index;
     logic       a_id;      // add the atan reduction id to A's constant index
     logic       a_neg;
     logic       a_abs;
+    logic       a_trunc;   // A's significand cut to its top 13 bits
     logic       b_const;
-    logic [5:0] b_index;
+    logic [6:0] b_index;   // XTR: the slot written with 2^27 + 2^15 + k
     logic       b_id;
     logic       b_abs;
+    logic       b_trunc;
     logic [3:0] dest;      // scratch slot written with the result
     logic [4:0] pred;      // run only when the predicate holds
     logic [1:0] setp;      // CMP: 1 swap = A < B, 2/3 id += A >= B
@@ -22,191 +24,326 @@ localparam logic [2:0] X87_POLY_OP_DIV = 3'd3;
 localparam logic [2:0] X87_POLY_OP_RND = 3'd4;
 localparam logic [2:0] X87_POLY_OP_CMP = 3'd5;
 localparam logic [2:0] X87_POLY_OP_AUX = 3'd6;
+localparam logic [2:0] X87_POLY_OP_XTR = 3'd7;
 localparam logic [1:0] X87_POLY_SETP_NONE = 2'd0;
 localparam logic [1:0] X87_POLY_SETP_SWAP = 2'd1;
 localparam logic [1:0] X87_POLY_SETP_ID1 = 2'd2;
 localparam logic [1:0] X87_POLY_SETP_ID2 = 2'd3;
-localparam int X87_POLY_WORD_BITS = 34;
-localparam logic [6:0] X87_POLY_ENTRY_SINCOS = 7'd0;
-localparam logic [6:0] X87_POLY_ENTRY_ATAN = 7'd56;
+localparam int X87_POLY_WORD_BITS = 38;
+localparam int X87_POLY_PC_BITS = 8;
+localparam int X87_POLY_CONST_BITS = 7;
+localparam logic [7:0] X87_POLY_ENTRY_SINCOS = 8'd0;
+localparam logic [7:0] X87_POLY_ENTRY_ATAN = 8'd56;
+localparam logic [7:0] X87_POLY_ENTRY_EXP = 8'd103;
+localparam logic [7:0] X87_POLY_ENTRY_EXP_TINY = 8'd145;
+localparam logic [7:0] X87_POLY_ENTRY_LOG1P = 8'd146;
+localparam logic [7:0] X87_POLY_ENTRY_LOG1P_TINY = 8'd189;
+localparam logic [7:0] X87_POLY_ENTRY_LOG = 8'd148;
+localparam logic [52:0] X87_POLY_SQRT2_SIG = 53'h16a09e667f3bcc;  // XTR: m >= sqrt(2) halves
 
-function automatic logic [33:0] x87_poly_word(input logic [6:0] address);
+function automatic logic [37:0] x87_poly_word(input logic [7:0] address);
     case (address)
-        7'd0: return 34'h000080280; // MUL IN_A,TWO_OVER_PI -> T1 [ALWAYS]
-        7'd1: return 34'h202800100; // RND T1 -> N [ALWAYS]
-        7'd2: return 34'h001082280; // MUL N,P1 -> T1 [ALWAYS]
-        7'd3: return 34'h10000a600; // SUB IN_A,T1 -> U [ALWAYS]
-        7'd4: return 34'h001084280; // MUL N,P2 -> T1 [ALWAYS]
-        7'd5: return 34'h001086700; // MUL N,P3 -> W [ALWAYS]
-        7'd6: return 34'h08281c280; // ADD T1,W -> T1 [ALWAYS]
-        7'd7: return 34'h001088700; // MUL N,P4 -> W [ALWAYS]
-        7'd8: return 34'h08281c280; // ADD T1,W -> T1 [ALWAYS]
-        7'd9: return 34'h10600a180; // SUB U,T1 -> R [ALWAYS]
-        7'd10: return 34'h106006700; // SUB U,R -> W [ALWAYS]
-        7'd11: return 34'h10700a680; // SUB W,T1 -> V [ALWAYS]
-        7'd12: return 34'h001806200; // MUL R,R -> Z [ALWAYS]
-        7'd13: return 34'h002094300; // MUL Z,S6 -> P [ALWAYS]
-        7'd14: return 34'h083092300; // ADD P,S5 -> P [ALWAYS]
-        7'd15: return 34'h003008300; // MUL P,Z -> P [ALWAYS]
-        7'd16: return 34'h083090300; // ADD P,S4 -> P [ALWAYS]
-        7'd17: return 34'h003008300; // MUL P,Z -> P [ALWAYS]
-        7'd18: return 34'h08308e300; // ADD P,S3 -> P [ALWAYS]
-        7'd19: return 34'h003008300; // MUL P,Z -> P [ALWAYS]
-        7'd20: return 34'h08308c300; // ADD P,S2 -> P [ALWAYS]
-        7'd21: return 34'h003008300; // MUL P,Z -> P [ALWAYS]
-        7'd22: return 34'h08308a300; // ADD P,S1 -> P [ALWAYS]
-        7'd23: return 34'h001808280; // MUL R,Z -> T1 [ALWAYS]
-        7'd24: return 34'h00280c280; // MUL T1,P -> T1 [ALWAYS]
-        7'd25: return 34'h08281a280; // ADD T1,V -> T1 [ALWAYS]
-        7'd26: return 34'h08180a400; // ADD R,T1 -> S [ALWAYS]
-        7'd27: return 34'h0020a0380; // MUL Z,C6 -> Q [ALWAYS]
-        7'd28: return 34'h08389e380; // ADD Q,C5 -> Q [ALWAYS]
-        7'd29: return 34'h003808380; // MUL Q,Z -> Q [ALWAYS]
-        7'd30: return 34'h08389c380; // ADD Q,C4 -> Q [ALWAYS]
-        7'd31: return 34'h003808380; // MUL Q,Z -> Q [ALWAYS]
-        7'd32: return 34'h08389a380; // ADD Q,C3 -> Q [ALWAYS]
-        7'd33: return 34'h003808380; // MUL Q,Z -> Q [ALWAYS]
-        7'd34: return 34'h083898380; // ADD Q,C2 -> Q [ALWAYS]
-        7'd35: return 34'h003808380; // MUL Q,Z -> Q [ALWAYS]
-        7'd36: return 34'h083896380; // ADD Q,C1 -> Q [ALWAYS]
-        7'd37: return 34'h002008280; // MUL Z,Z -> T1 [ALWAYS]
-        7'd38: return 34'h00280e280; // MUL T1,Q -> T1 [ALWAYS]
-        7'd39: return 34'h00181a700; // MUL R,V -> W [ALWAYS]
-        7'd40: return 34'h10281c280; // SUB T1,W -> T1 [ALWAYS]
-        7'd41: return 34'h0020a2500; // MUL Z,HALF -> H [ALWAYS]
-        7'd42: return 34'h10500a280; // SUB H,T1 -> T1 [ALWAYS]
-        7'd43: return 34'h12900a480; // SUB ONE,T1 -> C [ALWAYS]
-        7'd44: return 34'h304800284; // AUX C -> T1 [Q0]
-        7'd45: return 34'h304200288; // AUX S -> T1 [Q1]
-        7'd46: return 34'h304a0028c; // AUX C -> T1 [Q2]
-        7'd47: return 34'h304000290; // AUX S -> T1 [Q3]
-        7'd48: return 34'h0440a4294; // MUL S,ONE -> T1 [Q0S] final
-        7'd49: return 34'h0448a4298; // MUL C,ONE -> T1 [Q1S] final
-        7'd50: return 34'h0442a429c; // MUL S,ONE -> T1 [Q2S] final
-        7'd51: return 34'h044aa42a0; // MUL C,ONE -> T1 [Q3S] final
-        7'd52: return 34'h0448a42a4; // MUL C,ONE -> T1 [Q0C] final
-        7'd53: return 34'h0442a42a8; // MUL S,ONE -> T1 [Q1C] final
-        7'd54: return 34'h044aa42ac; // MUL C,ONE -> T1 [Q2C] final
-        7'd55: return 34'h0440a42b0; // MUL S,ONE -> T1 [Q3C] final
-        7'd56: return 34'h280900801; // CMP IN_B,IN_A -> - [ALWAYS]
-        7'd57: return 34'h180102db8; // DIV IN_A,IN_B -> T [NOSWAP]
-        7'd58: return 34'h180900db4; // DIV IN_B,IN_A -> T [SWAP]
-        7'd59: return 34'h2858a6002; // CMP T,K7_16 -> - [ALWAYS]
-        7'd60: return 34'h2858a8003; // CMP T,K11_16 -> - [ALWAYS]
-        7'd61: return 34'h1058ab600; // SUB T,CT0 -> U [ALWAYS]
-        7'd62: return 34'h0058ab680; // MUL T,CT0 -> V [ALWAYS]
-        7'd63: return 34'h0868a4680; // ADD V,ONE -> V [ALWAYS]
-        7'd64: return 34'h18601a580; // DIV U,V -> T [ALWAYS]
-        7'd65: return 34'h005816200; // MUL T,T -> Z [ALWAYS]
-        7'd66: return 34'h002008700; // MUL Z,Z -> W [ALWAYS]
-        7'd67: return 34'h0070f4300; // MUL W,AT10 -> P [ALWAYS]
-        7'd68: return 34'h0830f0300; // ADD P,AT8 -> P [ALWAYS]
-        7'd69: return 34'h00301c300; // MUL P,W -> P [ALWAYS]
-        7'd70: return 34'h0830ec300; // ADD P,AT6 -> P [ALWAYS]
-        7'd71: return 34'h00301c300; // MUL P,W -> P [ALWAYS]
-        7'd72: return 34'h0830e8300; // ADD P,AT4 -> P [ALWAYS]
-        7'd73: return 34'h00301c300; // MUL P,W -> P [ALWAYS]
-        7'd74: return 34'h0830e4300; // ADD P,AT2 -> P [ALWAYS]
-        7'd75: return 34'h00301c300; // MUL P,W -> P [ALWAYS]
-        7'd76: return 34'h0830e0300; // ADD P,AT0 -> P [ALWAYS]
-        7'd77: return 34'h003008300; // MUL P,Z -> P [ALWAYS]
-        7'd78: return 34'h0070f2780; // MUL W,AT9 -> A2 [ALWAYS]
-        7'd79: return 34'h0878ee780; // ADD A2,AT7 -> A2 [ALWAYS]
-        7'd80: return 34'h00781c780; // MUL A2,W -> A2 [ALWAYS]
-        7'd81: return 34'h0878ea780; // ADD A2,AT5 -> A2 [ALWAYS]
-        7'd82: return 34'h00781c780; // MUL A2,W -> A2 [ALWAYS]
-        7'd83: return 34'h0878e6780; // ADD A2,AT3 -> A2 [ALWAYS]
-        7'd84: return 34'h00781c780; // MUL A2,W -> A2 [ALWAYS]
-        7'd85: return 34'h0878e2780; // ADD A2,AT1 -> A2 [ALWAYS]
-        7'd86: return 34'h00781c780; // MUL A2,W -> A2 [ALWAYS]
-        7'd87: return 34'h08301e400; // ADD P,A2 -> S [ALWAYS]
-        7'd88: return 34'h005810400; // MUL T,S -> S [ALWAYS]
-        7'd89: return 34'h1040c9440; // SUB S,LOA0 -> S [QA]
-        7'd90: return 34'h104016440; // SUB S,T -> S [QA]
-        7'd91: return 34'h12c4101c0; // SUB HIA0,S -> R [QA]
-        7'd92: return 34'h1040db44c; // SUB S,LOD0 -> S [QD]
-        7'd93: return 34'h10401644c; // SUB S,T -> S [QD]
-        7'd94: return 34'h130c101cc; // SUB HID0,S -> R [QD]
-        7'd95: return 34'h105810444; // SUB T,S -> S [QB]
-        7'd96: return 34'h1040cf444; // SUB S,LOB0 -> S [QB]
-        7'd97: return 34'h12dc101c4; // SUB HIB0,S -> R [QB]
-        7'd98: return 34'h105810448; // SUB T,S -> S [QC]
-        7'd99: return 34'h1040d5448; // SUB S,LOC0 -> S [QC]
-        7'd100: return 34'h12f4101c8; // SUB HIC0,S -> R [QC]
-        7'd101: return 34'h041aa42bc; // MUL R,ONE -> T1 [YNEG] final
-        7'd102: return 34'h0418a4280; // MUL R,ONE -> T1 [ALWAYS] final
+        8'd0: return 38'h0000200280; // MUL IN_A,TWO_OVER_PI -> T1 [ALWAYS]
+        8'd1: return 38'h2014000100; // RND T1 -> N [ALWAYS]
+        8'd2: return 38'h0008204280; // MUL N,P1 -> T1 [ALWAYS]
+        8'd3: return 38'h1000014600; // SUB IN_A,T1 -> U [ALWAYS]
+        8'd4: return 38'h0008208280; // MUL N,P2 -> T1 [ALWAYS]
+        8'd5: return 38'h000820c700; // MUL N,P3 -> W [ALWAYS]
+        8'd6: return 38'h0814038280; // ADD T1,W -> T1 [ALWAYS]
+        8'd7: return 38'h0008210700; // MUL N,P4 -> W [ALWAYS]
+        8'd8: return 38'h0814038280; // ADD T1,W -> T1 [ALWAYS]
+        8'd9: return 38'h1030014180; // SUB U,T1 -> R [ALWAYS]
+        8'd10: return 38'h103000c700; // SUB U,R -> W [ALWAYS]
+        8'd11: return 38'h1038014680; // SUB W,T1 -> V [ALWAYS]
+        8'd12: return 38'h000c00c200; // MUL R,R -> Z [ALWAYS]
+        8'd13: return 38'h0010228300; // MUL Z,S6 -> P [ALWAYS]
+        8'd14: return 38'h0818224300; // ADD P,S5 -> P [ALWAYS]
+        8'd15: return 38'h0018010300; // MUL P,Z -> P [ALWAYS]
+        8'd16: return 38'h0818220300; // ADD P,S4 -> P [ALWAYS]
+        8'd17: return 38'h0018010300; // MUL P,Z -> P [ALWAYS]
+        8'd18: return 38'h081821c300; // ADD P,S3 -> P [ALWAYS]
+        8'd19: return 38'h0018010300; // MUL P,Z -> P [ALWAYS]
+        8'd20: return 38'h0818218300; // ADD P,S2 -> P [ALWAYS]
+        8'd21: return 38'h0018010300; // MUL P,Z -> P [ALWAYS]
+        8'd22: return 38'h0818214300; // ADD P,S1 -> P [ALWAYS]
+        8'd23: return 38'h000c010280; // MUL R,Z -> T1 [ALWAYS]
+        8'd24: return 38'h0014018280; // MUL T1,P -> T1 [ALWAYS]
+        8'd25: return 38'h0814034280; // ADD T1,V -> T1 [ALWAYS]
+        8'd26: return 38'h080c014400; // ADD R,T1 -> S [ALWAYS]
+        8'd27: return 38'h0010240380; // MUL Z,C6 -> Q [ALWAYS]
+        8'd28: return 38'h081c23c380; // ADD Q,C5 -> Q [ALWAYS]
+        8'd29: return 38'h001c010380; // MUL Q,Z -> Q [ALWAYS]
+        8'd30: return 38'h081c238380; // ADD Q,C4 -> Q [ALWAYS]
+        8'd31: return 38'h001c010380; // MUL Q,Z -> Q [ALWAYS]
+        8'd32: return 38'h081c234380; // ADD Q,C3 -> Q [ALWAYS]
+        8'd33: return 38'h001c010380; // MUL Q,Z -> Q [ALWAYS]
+        8'd34: return 38'h081c230380; // ADD Q,C2 -> Q [ALWAYS]
+        8'd35: return 38'h001c010380; // MUL Q,Z -> Q [ALWAYS]
+        8'd36: return 38'h081c22c380; // ADD Q,C1 -> Q [ALWAYS]
+        8'd37: return 38'h0010010280; // MUL Z,Z -> T1 [ALWAYS]
+        8'd38: return 38'h001401c280; // MUL T1,Q -> T1 [ALWAYS]
+        8'd39: return 38'h000c034700; // MUL R,V -> W [ALWAYS]
+        8'd40: return 38'h1014038280; // SUB T1,W -> T1 [ALWAYS]
+        8'd41: return 38'h0010244500; // MUL Z,HALF -> H [ALWAYS]
+        8'd42: return 38'h1028014280; // SUB H,T1 -> T1 [ALWAYS]
+        8'd43: return 38'h1248014480; // SUB ONE,T1 -> C [ALWAYS]
+        8'd44: return 38'h3024000284; // AUX C -> T1 [Q0]
+        8'd45: return 38'h3021000288; // AUX S -> T1 [Q1]
+        8'd46: return 38'h302500028c; // AUX C -> T1 [Q2]
+        8'd47: return 38'h3020000290; // AUX S -> T1 [Q3]
+        8'd48: return 38'h0420248294; // MUL S,ONE -> T1 [Q0S] final
+        8'd49: return 38'h0424248298; // MUL C,ONE -> T1 [Q1S] final
+        8'd50: return 38'h042124829c; // MUL S,ONE -> T1 [Q2S] final
+        8'd51: return 38'h04252482a0; // MUL C,ONE -> T1 [Q3S] final
+        8'd52: return 38'h04242482a4; // MUL C,ONE -> T1 [Q0C] final
+        8'd53: return 38'h04212482a8; // MUL S,ONE -> T1 [Q1C] final
+        8'd54: return 38'h04252482ac; // MUL C,ONE -> T1 [Q2C] final
+        8'd55: return 38'h04202482b0; // MUL S,ONE -> T1 [Q3C] final
+        8'd56: return 38'h2804801001; // CMP IN_B,IN_A -> - [ALWAYS]
+        8'd57: return 38'h18008055b8; // DIV IN_A,IN_B -> T [NOSWAP]
+        8'd58: return 38'h18048015b4; // DIV IN_B,IN_A -> T [SWAP]
+        8'd59: return 38'h282c24c002; // CMP T,K7_16 -> - [ALWAYS]
+        8'd60: return 38'h282c250003; // CMP T,K11_16 -> - [ALWAYS]
+        8'd61: return 38'h102c256600; // SUB T,CT0 -> U [ALWAYS]
+        8'd62: return 38'h002c256680; // MUL T,CT0 -> V [ALWAYS]
+        8'd63: return 38'h0834248680; // ADD V,ONE -> V [ALWAYS]
+        8'd64: return 38'h1830034580; // DIV U,V -> T [ALWAYS]
+        8'd65: return 38'h002c02c200; // MUL T,T -> Z [ALWAYS]
+        8'd66: return 38'h0010010700; // MUL Z,Z -> W [ALWAYS]
+        8'd67: return 38'h00382e8300; // MUL W,AT10 -> P [ALWAYS]
+        8'd68: return 38'h08182e0300; // ADD P,AT8 -> P [ALWAYS]
+        8'd69: return 38'h0018038300; // MUL P,W -> P [ALWAYS]
+        8'd70: return 38'h08182d8300; // ADD P,AT6 -> P [ALWAYS]
+        8'd71: return 38'h0018038300; // MUL P,W -> P [ALWAYS]
+        8'd72: return 38'h08182d0300; // ADD P,AT4 -> P [ALWAYS]
+        8'd73: return 38'h0018038300; // MUL P,W -> P [ALWAYS]
+        8'd74: return 38'h08182c8300; // ADD P,AT2 -> P [ALWAYS]
+        8'd75: return 38'h0018038300; // MUL P,W -> P [ALWAYS]
+        8'd76: return 38'h08182c0300; // ADD P,AT0 -> P [ALWAYS]
+        8'd77: return 38'h0018010300; // MUL P,Z -> P [ALWAYS]
+        8'd78: return 38'h00382e4780; // MUL W,AT9 -> A2 [ALWAYS]
+        8'd79: return 38'h083c2dc780; // ADD A2,AT7 -> A2 [ALWAYS]
+        8'd80: return 38'h003c038780; // MUL A2,W -> A2 [ALWAYS]
+        8'd81: return 38'h083c2d4780; // ADD A2,AT5 -> A2 [ALWAYS]
+        8'd82: return 38'h003c038780; // MUL A2,W -> A2 [ALWAYS]
+        8'd83: return 38'h083c2cc780; // ADD A2,AT3 -> A2 [ALWAYS]
+        8'd84: return 38'h003c038780; // MUL A2,W -> A2 [ALWAYS]
+        8'd85: return 38'h083c2c4780; // ADD A2,AT1 -> A2 [ALWAYS]
+        8'd86: return 38'h003c038780; // MUL A2,W -> A2 [ALWAYS]
+        8'd87: return 38'h081803c400; // ADD P,A2 -> S [ALWAYS]
+        8'd88: return 38'h002c020400; // MUL T,S -> S [ALWAYS]
+        8'd89: return 38'h1020292440; // SUB S,LOA0 -> S [QA]
+        8'd90: return 38'h102002c440; // SUB S,T -> S [QA]
+        8'd91: return 38'h12620201c0; // SUB HIA0,S -> R [QA]
+        8'd92: return 38'h10202b644c; // SUB S,LOD0 -> S [QD]
+        8'd93: return 38'h102002c44c; // SUB S,T -> S [QD]
+        8'd94: return 38'h12860201cc; // SUB HID0,S -> R [QD]
+        8'd95: return 38'h102c020444; // SUB T,S -> S [QB]
+        8'd96: return 38'h102029e444; // SUB S,LOB0 -> S [QB]
+        8'd97: return 38'h126e0201c4; // SUB HIB0,S -> R [QB]
+        8'd98: return 38'h102c020448; // SUB T,S -> S [QC]
+        8'd99: return 38'h10202aa448; // SUB S,LOC0 -> S [QC]
+        8'd100: return 38'h127a0201c8; // SUB HIC0,S -> R [QC]
+        8'd101: return 38'h040d2482bc; // MUL R,ONE -> T1 [YNEG] final
+        8'd102: return 38'h040c248280; // MUL R,ONE -> T1 [ALWAYS] final
+        8'd103: return 38'h2800a44001; // CMP IN_A,HALF -> - [ALWAYS]
+        8'd104: return 38'h1000248040; // SUB IN_A,ONE -> IN_A [QA]
+        8'd105: return 38'h0800248048; // ADD IN_A,ONE -> IN_A [QC]
+        8'd106: return 38'h1000000e80; // SUB IN_A,IN_A -> V [ALWAYS] b_trunc
+        8'd107: return 38'h0000328300; // MUL IN_A,E12 -> P [ALWAYS]
+        8'd108: return 38'h0818324300; // ADD P,E11 -> P [ALWAYS]
+        8'd109: return 38'h0018000300; // MUL P,IN_A -> P [ALWAYS]
+        8'd110: return 38'h0818320300; // ADD P,E10 -> P [ALWAYS]
+        8'd111: return 38'h0018000300; // MUL P,IN_A -> P [ALWAYS]
+        8'd112: return 38'h081831c300; // ADD P,E9 -> P [ALWAYS]
+        8'd113: return 38'h0018000300; // MUL P,IN_A -> P [ALWAYS]
+        8'd114: return 38'h0818318300; // ADD P,E8 -> P [ALWAYS]
+        8'd115: return 38'h0018000300; // MUL P,IN_A -> P [ALWAYS]
+        8'd116: return 38'h0818314300; // ADD P,E7 -> P [ALWAYS]
+        8'd117: return 38'h0018000300; // MUL P,IN_A -> P [ALWAYS]
+        8'd118: return 38'h0818310300; // ADD P,E6 -> P [ALWAYS]
+        8'd119: return 38'h0018000300; // MUL P,IN_A -> P [ALWAYS]
+        8'd120: return 38'h081830c300; // ADD P,E5 -> P [ALWAYS]
+        8'd121: return 38'h0018000300; // MUL P,IN_A -> P [ALWAYS]
+        8'd122: return 38'h0818308300; // ADD P,E4 -> P [ALWAYS]
+        8'd123: return 38'h0018000300; // MUL P,IN_A -> P [ALWAYS]
+        8'd124: return 38'h0818304300; // ADD P,E3 -> P [ALWAYS]
+        8'd125: return 38'h0018000300; // MUL P,IN_A -> P [ALWAYS]
+        8'd126: return 38'h0818300300; // ADD P,E2 -> P [ALWAYS]
+        8'd127: return 38'h0018000300; // MUL P,IN_A -> P [ALWAYS]
+        8'd128: return 38'h0018000300; // MUL P,IN_A -> P [ALWAYS]
+        8'd129: return 38'h00342f8680; // MUL V,LN2HI -> V [ALWAYS]
+        8'd130: return 38'h00002fc700; // MUL IN_A,LN2LO -> W [ALWAYS]
+        8'd131: return 38'h0834038680; // ADD V,W -> V [ALWAYS]
+        8'd132: return 38'h0818034580; // ADD P,V -> T [ALWAYS]
+        8'd133: return 38'h00006f8500; // MUL IN_A,LN2HI -> H [ALWAYS] a_trunc
+        8'd134: return 38'h0c2802c2b4; // ADD H,T -> T1 [SWAP] final
+        8'd135: return 38'h082802c748; // ADD H,T -> W [QC]
+        8'd136: return 38'h0038244748; // MUL W,HALF -> W [QC]
+        8'd137: return 38'h14382442c8; // SUB W,HALF -> T1 [QC] final
+        8'd138: return 38'h28282f0042; // CMP H,MQUARTER -> - [QA]
+        8'd139: return 38'h0828244750; // ADD H,HALF -> W [QA0]
+        8'd140: return 38'h083802c750; // ADD W,T -> W [QA0]
+        8'd141: return 38'h04382ec2d0; // MUL W,TWO -> T1 [QA0] final
+        8'd142: return 38'h082802c754; // ADD H,T -> W [QA1]
+        8'd143: return 38'h00382ec754; // MUL W,TWO -> W [QA1]
+        8'd144: return 38'h0c382482d4; // ADD W,ONE -> T1 [QA1] final
+        8'd145: return 38'h04002f4280; // MUL IN_A,LN2 -> T1 [ALWAYS] final
+        8'd146: return 38'h2804b58001; // CMP IN_B,LOG1P_LIM -> - [ALWAYS]
+        8'd147: return 38'h08042480b8; // ADD IN_B,ONE -> IN_B [NOSWAP]
+        8'd148: return 38'h38040084b8; // XTR IN_B,N -> C [NOSWAP]
+        8'd149: return 38'h10242480b8; // SUB C,ONE -> IN_B [NOSWAP]
+        8'd150: return 38'h08042ec280; // ADD IN_B,TWO -> T1 [ALWAYS]
+        8'd151: return 38'h1804014400; // DIV IN_B,T1 -> S [ALWAYS]
+        8'd152: return 38'h0020020200; // MUL S,S -> Z [ALWAYS]
+        8'd153: return 38'h0010344180; // MUL Z,LG7 -> R [ALWAYS]
+        8'd154: return 38'h080c340180; // ADD R,LG6 -> R [ALWAYS]
+        8'd155: return 38'h000c010180; // MUL R,Z -> R [ALWAYS]
+        8'd156: return 38'h080c33c180; // ADD R,LG5 -> R [ALWAYS]
+        8'd157: return 38'h000c010180; // MUL R,Z -> R [ALWAYS]
+        8'd158: return 38'h080c338180; // ADD R,LG4 -> R [ALWAYS]
+        8'd159: return 38'h000c010180; // MUL R,Z -> R [ALWAYS]
+        8'd160: return 38'h080c334180; // ADD R,LG3 -> R [ALWAYS]
+        8'd161: return 38'h000c010180; // MUL R,Z -> R [ALWAYS]
+        8'd162: return 38'h080c330180; // ADD R,LG2 -> R [ALWAYS]
+        8'd163: return 38'h000c010180; // MUL R,Z -> R [ALWAYS]
+        8'd164: return 38'h080c32c180; // ADD R,LG1 -> R [ALWAYS]
+        8'd165: return 38'h000c010180; // MUL R,Z -> R [ALWAYS]
+        8'd166: return 38'h0004244500; // MUL IN_B,HALF -> H [ALWAYS]
+        8'd167: return 38'h0028004500; // MUL H,IN_B -> H [ALWAYS]
+        8'd168: return 38'h082800c280; // ADD H,R -> T1 [ALWAYS]
+        8'd169: return 38'h0020014280; // MUL S,T1 -> T1 [ALWAYS]
+        8'd170: return 38'h1004028600; // SUB IN_B,H -> U [ALWAYS]
+        8'd171: return 38'h1004030e80; // SUB IN_B,U -> V [ALWAYS] b_trunc
+        8'd172: return 38'h1034028680; // SUB V,H -> V [ALWAYS]
+        8'd173: return 38'h0834014680; // ADD V,T1 -> V [ALWAYS]
+        8'd174: return 38'h003074c300; // MUL U,IVLN2HI -> P [ALWAYS] a_trunc
+        8'd175: return 38'h0034348680; // MUL V,IVLN2 -> V [ALWAYS]
+        8'd176: return 38'h0030750700; // MUL U,IVLN2LO -> W [ALWAYS] a_trunc
+        8'd177: return 38'h0834038380; // ADD V,W -> Q [ALWAYS]
+        8'd178: return 38'h08080185d8; // ADD N,P -> T [KNZ]
+        8'd179: return 38'h100802c758; // SUB N,T -> W [KNZ]
+        8'd180: return 38'h0838018758; // ADD W,P -> W [KNZ]
+        8'd181: return 38'h083801c3d8; // ADD W,Q -> Q [KNZ]
+        8'd182: return 38'h102c354358; // SUB T,KBASE -> P [KNZ]
+        8'd183: return 38'h1000000d80; // SUB IN_A,IN_A -> T [ALWAYS] b_trunc
+        8'd184: return 38'h002c018580; // MUL T,P -> T [ALWAYS]
+        8'd185: return 38'h000001c700; // MUL IN_A,Q -> W [ALWAYS]
+        8'd186: return 38'h082c038580; // ADD T,W -> T [ALWAYS]
+        8'd187: return 38'h0000418700; // MUL IN_A,P -> W [ALWAYS] a_trunc
+        8'd188: return 38'h0c3802c280; // ADD W,T -> T1 [ALWAYS] final
+        8'd189: return 38'h1004004e80; // SUB IN_B,IN_B -> V [ALWAYS] b_trunc
+        8'd190: return 38'h000474c300; // MUL IN_B,IVLN2HI -> P [ALWAYS] a_trunc
+        8'd191: return 38'h0034348680; // MUL V,IVLN2 -> V [ALWAYS]
+        8'd192: return 38'h0004750700; // MUL IN_B,IVLN2LO -> W [ALWAYS] a_trunc
+        8'd193: return 38'h0834038380; // ADD V,W -> Q [ALWAYS]
+        8'd194: return 38'h1000000d80; // SUB IN_A,IN_A -> T [ALWAYS] b_trunc
+        8'd195: return 38'h002c018580; // MUL T,P -> T [ALWAYS]
+        8'd196: return 38'h000001c700; // MUL IN_A,Q -> W [ALWAYS]
+        8'd197: return 38'h082c038580; // ADD T,W -> T [ALWAYS]
+        8'd198: return 38'h0000418700; // MUL IN_A,P -> W [ALWAYS] a_trunc
+        8'd199: return 38'h0c3802c280; // ADD W,T -> T1 [ALWAYS] final
         default: return '0;
     endcase
 endfunction
 
-function automatic logic [74:0] x87_poly_const(input logic [5:0] address);
+function automatic logic [74:0] x87_poly_const(input logic [6:0] address);
     case (address)
-        6'd0: return 75'h1fff517cc1b727220c2; // TWO_OVER_PI = 0.6366197723675814
-        6'd1: return 75'h1fffe487ed510000002; // P1 = 1.5707963267341256
-        6'd2: return 75'h1feec2d184698000002; // P2 = 6.077100506303966e-11
-        6'd3: return 75'h1fdd4c6628b80000002; // P3 = 2.0222662487111665e-21
-        6'd4: return 75'h1fcbee0e68948127042; // P4 = 8.4784276603689e-32
-        6'd5: return 75'h5ffe555555555555242; // S1 = -0.16666666666666632
-        6'd6: return 75'h1ffc4444444443e2982; // S2 = 0.00833333333332249
-        6'd7: return 75'h5ff9680680670587542; // S3 = -0.0001984126982985795
-        6'd8: return 75'h1ff65c778d5ec7f9f42; // S4 = 2.7557313707070068e-06
-        6'd9: return 75'h5ff2eb979a28ae73ac2; // S5 = -2.5050760253406863e-08
-        6'd10: return 75'h1fef5764e96b3f55f02; // S6 = 1.58969099521155e-10
-        6'd11: return 75'h1ffd555555555555302; // C1 = 0.0416666666666666
-        6'd12: return 75'h5ffadb05b05b0545dc2; // C2 = -0.001388888888887411
-        6'd13: return 75'h1ff7e80680672c56402; // C3 = 2.480158728947673e-05
-        6'd14: return 75'h5ff4c9f93e02714ab42; // C4 = -2.7557314351390663e-07
-        6'd15: return 75'h1ff147ba7af6d2c7102; // C5 = 2.087572321298175e-09
-        6'd16: return 75'h5fed63eba6fa20e3502; // C6 = -1.1359647557788195e-11
-        6'd17: return 75'h1fff400000000000002; // HALF = 0.5
-        6'd18: return 75'h1fffc00000000000002; // ONE = 1.0
-        6'd19: return 75'h1ffef00000000000002; // K7_16 = 0.4375
-        6'd20: return 75'h1fff580000000000002; // K11_16 = 0.6875
-        6'd21: return 75'h0000000000000000001; // CT0 = 0.0
-        6'd22: return 75'h1fff400000000000002; // CT1 = 0.5
-        6'd23: return 75'h1fffc00000000000002; // CT2 = 1.0
-        6'd24: return 75'h0000000000000000001; // HIA0 = 0.0
-        6'd25: return 75'h1ffef6b19c1586ed3c2; // HIA1 = 0.4636476090008061
-        6'd26: return 75'h1fff6487ed5110b4602; // HIA2 = 0.7853981633974483
-        6'd27: return 75'h1fffe487ed5110b4602; // HIB0 = 1.5707963267948966
-        6'd28: return 75'h1fffc6db864baef9102; // HIB1 = 1.1071487177940904
-        6'd29: return 75'h1fff6487ed5110b4602; // HIB2 = 0.7853981633974483
-        6'd30: return 75'h20006487ed5110b4602; // HIC0 = 3.141592653589793
-        6'd31: return 75'h200055b1b9ce5fd6b82; // HIC1 = 2.677945044588987
-        6'd32: return 75'h20004b65f1fccc87482; // HIC2 = 2.356194490192345
-        6'd33: return 75'h1fffe487ed5110b4602; // HID0 = 1.5707963267948966
-        6'd34: return 75'h2000411a2a2b3937d82; // HID1 = 2.0344439357957027
-        6'd35: return 75'h20004b65f1fccc87482; // HID2 = 2.356194490192345
-        6'd36: return 75'h0000000000000000001; // LOA0 = 0.0
-        6'd37: return 75'h1fe3e8adfc88bd97882; // LOA1 = 2.2698777452961687e-17
-        6'd38: return 75'h1fe4469898cc51701c2; // LOA2 = 3.061616997868383e-17
-        6'd39: return 75'h1fe4c69898cc51701c2; // LOB0 = 6.123233995736766e-17
-        6'd40: return 75'h1fe4ec6d19aa220a382; // LOB1 = 9.40447137356638e-17
-        6'd41: return 75'h1fe4469898cc51701c2; // LOB2 = 3.061616997868383e-17
-        6'd42: return 75'h1fe5469898cc51701c2; // LOC0 = 1.2246467991473532e-16
-        6'd43: return 75'h1fe55982d93b39bd2c2; // LOC1 = 1.5527705369303147e-16
-        6'd44: return 75'h1fe4e9e4e5327a28282; // LOC2 = 9.184850993605148e-17
-        6'd45: return 75'h1fe4c69898cc51701c2; // LOD0 = 6.123233995736766e-17
-        6'd46: return 75'h1fe441882fdd01abfc2; // LOD1 = 2.841996617907152e-17
-        6'd47: return 75'h1fe4e9e4e5327a28282; // LOD2 = 9.184850993605148e-17
-        6'd48: return 75'h1ffed55555555554342; // AT0 = 0.3333333333333293
-        6'd49: return 75'h5ffe6666666663af102; // AT1 = -0.19999999999876483
-        6'd50: return 75'h1ffe49249248020ffc2; // AT2 = 0.14285714272503466
-        6'd51: return 75'h5ffdf1c71bf88c59c42; // AT3 = -0.11111110405462356
-        6'd52: return 75'h1ffddd1737153081b82; // AT4 = 0.09090887133436507
-        6'd53: return 75'h5ffdcec3cabdd269b42; // AT5 = -0.0769187620504483
-        6'd54: return 75'h1ffdc4359a8340f5442; // AT6 = 0.06661073137387531
-        6'd55: return 75'h5ffd7778b54b7bf6682; // AT7 = -0.058335701337905735
-        6'd56: return 75'h1ffd65ed2c91d837ac2; // AT8 = 0.049768779946159324
-        6'd57: return 75'h5ffd4ad110b1a9b0bc2; // AT9 = -0.036531572744216916
-        6'd58: return 75'h1ffcc2b4eb8c8b68442; // AT10 = 0.016285820115365782
+        7'd0: return 75'h1fff517cc1b727220c2; // TWO_OVER_PI = 0.6366197723675814
+        7'd1: return 75'h1fffe487ed510000002; // P1 = 1.5707963267341256
+        7'd2: return 75'h1feec2d184698000002; // P2 = 6.077100506303966e-11
+        7'd3: return 75'h1fdd4c6628b80000002; // P3 = 2.0222662487111665e-21
+        7'd4: return 75'h1fcbee0e68948127042; // P4 = 8.4784276603689e-32
+        7'd5: return 75'h5ffe555555555555242; // S1 = -0.16666666666666632
+        7'd6: return 75'h1ffc4444444443e2982; // S2 = 0.00833333333332249
+        7'd7: return 75'h5ff9680680670587542; // S3 = -0.0001984126982985795
+        7'd8: return 75'h1ff65c778d5ec7f9f42; // S4 = 2.7557313707070068e-06
+        7'd9: return 75'h5ff2eb979a28ae73ac2; // S5 = -2.5050760253406863e-08
+        7'd10: return 75'h1fef5764e96b3f55f02; // S6 = 1.58969099521155e-10
+        7'd11: return 75'h1ffd555555555555302; // C1 = 0.0416666666666666
+        7'd12: return 75'h5ffadb05b05b0545dc2; // C2 = -0.001388888888887411
+        7'd13: return 75'h1ff7e80680672c56402; // C3 = 2.480158728947673e-05
+        7'd14: return 75'h5ff4c9f93e02714ab42; // C4 = -2.7557314351390663e-07
+        7'd15: return 75'h1ff147ba7af6d2c7102; // C5 = 2.087572321298175e-09
+        7'd16: return 75'h5fed63eba6fa20e3502; // C6 = -1.1359647557788195e-11
+        7'd17: return 75'h1fff400000000000002; // HALF = 0.5
+        7'd18: return 75'h1fffc00000000000002; // ONE = 1.0
+        7'd19: return 75'h1ffef00000000000002; // K7_16 = 0.4375
+        7'd20: return 75'h1fff580000000000002; // K11_16 = 0.6875
+        7'd21: return 75'h0000000000000000001; // CT0 = 0.0
+        7'd22: return 75'h1fff400000000000002; // CT1 = 0.5
+        7'd23: return 75'h1fffc00000000000002; // CT2 = 1.0
+        7'd24: return 75'h0000000000000000001; // HIA0 = 0.0
+        7'd25: return 75'h1ffef6b19c1586ed3c2; // HIA1 = 0.4636476090008061
+        7'd26: return 75'h1fff6487ed5110b4602; // HIA2 = 0.7853981633974483
+        7'd27: return 75'h1fffe487ed5110b4602; // HIB0 = 1.5707963267948966
+        7'd28: return 75'h1fffc6db864baef9102; // HIB1 = 1.1071487177940904
+        7'd29: return 75'h1fff6487ed5110b4602; // HIB2 = 0.7853981633974483
+        7'd30: return 75'h20006487ed5110b4602; // HIC0 = 3.141592653589793
+        7'd31: return 75'h200055b1b9ce5fd6b82; // HIC1 = 2.677945044588987
+        7'd32: return 75'h20004b65f1fccc87482; // HIC2 = 2.356194490192345
+        7'd33: return 75'h1fffe487ed5110b4602; // HID0 = 1.5707963267948966
+        7'd34: return 75'h2000411a2a2b3937d82; // HID1 = 2.0344439357957027
+        7'd35: return 75'h20004b65f1fccc87482; // HID2 = 2.356194490192345
+        7'd36: return 75'h0000000000000000001; // LOA0 = 0.0
+        7'd37: return 75'h1fe3e8adfc88bd97882; // LOA1 = 2.2698777452961687e-17
+        7'd38: return 75'h1fe4469898cc51701c2; // LOA2 = 3.061616997868383e-17
+        7'd39: return 75'h1fe4c69898cc51701c2; // LOB0 = 6.123233995736766e-17
+        7'd40: return 75'h1fe4ec6d19aa220a382; // LOB1 = 9.40447137356638e-17
+        7'd41: return 75'h1fe4469898cc51701c2; // LOB2 = 3.061616997868383e-17
+        7'd42: return 75'h1fe5469898cc51701c2; // LOC0 = 1.2246467991473532e-16
+        7'd43: return 75'h1fe55982d93b39bd2c2; // LOC1 = 1.5527705369303147e-16
+        7'd44: return 75'h1fe4e9e4e5327a28282; // LOC2 = 9.184850993605148e-17
+        7'd45: return 75'h1fe4c69898cc51701c2; // LOD0 = 6.123233995736766e-17
+        7'd46: return 75'h1fe441882fdd01abfc2; // LOD1 = 2.841996617907152e-17
+        7'd47: return 75'h1fe4e9e4e5327a28282; // LOD2 = 9.184850993605148e-17
+        7'd48: return 75'h1ffed55555555554342; // AT0 = 0.3333333333333293
+        7'd49: return 75'h5ffe6666666663af102; // AT1 = -0.19999999999876483
+        7'd50: return 75'h1ffe49249248020ffc2; // AT2 = 0.14285714272503466
+        7'd51: return 75'h5ffdf1c71bf88c59c42; // AT3 = -0.11111110405462356
+        7'd52: return 75'h1ffddd1737153081b82; // AT4 = 0.09090887133436507
+        7'd53: return 75'h5ffdcec3cabdd269b42; // AT5 = -0.0769187620504483
+        7'd54: return 75'h1ffdc4359a8340f5442; // AT6 = 0.06661073137387531
+        7'd55: return 75'h5ffd7778b54b7bf6682; // AT7 = -0.058335701337905735
+        7'd56: return 75'h1ffd65ed2c91d837ac2; // AT8 = 0.049768779946159324
+        7'd57: return 75'h5ffd4ad110b1a9b0bc2; // AT9 = -0.036531572744216916
+        7'd58: return 75'h1ffcc2b4eb8c8b68442; // AT10 = 0.016285820115365782
+        7'd59: return 75'h2000400000000000002; // TWO = 2.0
+        7'd60: return 75'h5ffec00000000000002; // MQUARTER = -0.25
+        7'd61: return 75'h1fff58b90bfbe8e7bc2; // LN2 = 0.6931471805599453
+        7'd62: return 75'h1fff58b90bfbe880002; // LN2HI = 0.6931471805592082
+        7'd63: return 75'h1feb67bcd5e4f1d9cc2; // LN2LO = 7.371002565167799e-13
+        7'd64: return 75'h1ffe7afef7fe0b163c2; // E2 = 0.24022650695910072
+        7'd65: return 75'h1ffd71ac235c1283082; // E3 = 0.0555041086648216
+        7'd66: return 75'h1ffc4ecaadbee939e02; // E4 = 0.009618129107628479
+        7'd67: return 75'h1ffad761ff9e2949d82; // E5 = 0.0013333558146416936
+        7'd68: return 75'h1ff950c244be1afd482; // E6 = 0.00015403530393375914
+        7'd69: return 75'h1ff77ff2ff19c373502; // E7 = 1.525273382983612e-05
+        7'd70: return 75'h1ff5d8b0089006e5f42; // E8 = 1.3215486802903931e-06
+        7'd71: return 75'h1ff3ed493eb989e0d02; // E9 = 1.0178062445845774e-07
+        7'd72: return 75'h1ff1f933c7342352e02; // E10 = 7.054899956372649e-09
+        7'd73: return 75'h1feffa74ff8e5485e42; // E11 = 4.4549605981865186e-10
+        7'd74: return 75'h1fedf123dda6b4b1182; // E12 = 2.572508057683636e-11
+        7'd75: return 75'h1fff5555555555564c2; // LG1 = 0.6666666666666735
+        7'd76: return 75'h1ffee66666665fe8102; // LG2 = 0.3999999999940942
+        7'd77: return 75'h1ffec92492508a4d642; // LG3 = 0.2857142874366239
+        7'd78: return 75'h1ffe71c7147639e2bc2; // LG4 = 0.22222198432149784
+        7'd79: return 75'h1ffe5d19925b2c0f782; // LG5 = 0.1818357216161805
+        7'd80: return 75'h1ffe4e682741e31a7c2; // LG6 = 0.15313837699209373
+        7'd81: return 75'h1ffe4bc44b7cf949102; // LG7 = 0.14798198605116586
+        7'd82: return 75'h1fffdc551d94ae0bf82; // IVLN2 = 1.4426950408889634
+        7'd83: return 75'h1fffdc551d900000002; // IVLN2HI = 1.4426950365304947
+        7'd84: return 75'h1ff1cae0bf85ddf4402; // IVLN2LO = 4.3584687174185184e-09
+        7'd85: return 75'h200d400400000000002; // KBASE = 134250496.0
+        7'd86: return 75'h1ffecafb0ccc06219c2; // LOG1P_LIM = 0.2928932188134525
         default: return '0;
     endcase
 endfunction
 
 function automatic logic x87_poly_pred(input logic [4:0] pred, input logic [1:0] quadrant,
                                        input logic cosine, input logic swap,
-                                       input logic xneg, input logic yneg);
+                                       input logic xneg, input logic yneg,
+                                       input logic [1:0] id, input logic k0);
     case (pred)
         5'd0: return 1'b1; // ALWAYS
         5'd1: return quadrant == 2'd0; // Q0
@@ -228,6 +365,9 @@ function automatic logic x87_poly_pred(input logic [4:0] pred, input logic [1:0]
         5'd17: return swap && !xneg; // QB
         5'd18: return !swap && xneg; // QC
         5'd19: return swap && xneg; // QD
+        5'd20: return !swap && !xneg && (id == 2'd0); // QA0
+        5'd21: return !swap && !xneg && (id != 2'd0); // QA1
+        5'd22: return !k0; // KNZ
         default: return 1'b0;
     endcase
 endfunction

@@ -239,17 +239,20 @@ logic         fptan_sincos;              // FSINCOS: push cos(x) instead of 1.0,
 // operations; the executor's TRANS operation only classifies (special results
 // commit directly, the rest finish with no commit and start a program).
 `include "x87_poly_rom.svh"
-typedef enum logic [2:0] {
+typedef enum logic [3:0] {
     POLY_IDLE,
     POLY_LOAD_B,       // second input into the scratch
     POLY_DECODE,       // program word read
     POLY_FETCH_A,      // predicate; operand A read
     POLY_FETCH_B,      // operand B read
-    POLY_ISSUE,        // start the executor operation (or AUX)
-    POLY_WAIT          // executor result into the scratch / predicates
+    POLY_ISSUE,        // start the executor operation (or AUX, XTR)
+    POLY_WAIT,         // executor result into the scratch / predicates
+    POLY_XTR_NORM,     // XTR: normalize (a denormal, one bit per cycle), m >= sqrt(2)
+    POLY_XTR_M,        // XTR: m into the scratch; k's offset sum
+    POLY_XTR_K         // XTR: 2^27 + 2^15 + k into the scratch; k == 0
 } poly_phase_t;
 poly_phase_t     poly_phase;
-logic [6:0]      poly_pc;
+logic [7:0]      poly_pc;
 x87_poly_word_t  poly_word;
 // While an operation runs (POLY_WAIT), the next word is fetched: read when
 // the operation issues, its predicate checked (a word that does not run is
@@ -258,8 +261,8 @@ x87_poly_word_t  poly_word;
 // the operation's done the next one issues at once; an operand that reads
 // the slot being written takes the executor's result. Not after CMP or RND
 // (they change the predicates and the reduction id) or the final word, and
-// not for AUX: those, and a fetch not complete at done, continue as before
-// at pf_pc.
+// not for AUX or XTR (control-only words): those, and a fetch not complete
+// at done, continue as before at pf_pc.
 typedef enum logic [2:0] {
     PF_IDLE,           // no fetch: continue at poly_pc + 1
     PF_PRED,           // pf_word in: predicate; reads (A, and B on the other port)
@@ -267,10 +270,10 @@ typedef enum logic [2:0] {
     PF_CAPA,           // A in; B's read
     PF_CAPB,           // B in
     PF_READY,          // issue at done
-    PF_STOP            // AUX at pf_pc: continue there as before
+    PF_STOP            // AUX or XTR at pf_pc: continue there as before
 } poly_fetch_t;
 poly_fetch_t     pf_state;
-logic [6:0]      pf_pc;
+logic [7:0]      pf_pc;
 x87_poly_word_t  pf_word;
 x87_reg_t        pf_opa;
 x87_reg_t        pf_opb;
@@ -281,6 +284,16 @@ logic            poly_xneg, poly_yneg;
 logic            poly_cosine;
 logic            poly_final;               // the executor runs the last operation
 logic            poly_denormal;            // the classified operand was denormal
+logic            poly_k0;                  // XTR: k == 0 (set at the start)
+logic            poly_exact;               // XTR: m == 1; PE from the final rounding only
+// XTR splits a positive A into 2^k * m, sqrt(1/2) <= m < sqrt(2): m into
+// dest, 2^27 + 2^15 + k (k's 16-bit offset binary at 2^0) into the slot
+// b_index names. A denormal (or unnormal) shifts left one bit per cycle.
+logic [52:0]     xtr_sig;
+logic            xtr_guard, xtr_round, xtr_sticky;
+logic signed [16:0] xtr_exp;               // A's exponent (biased; 1 for a denormal)
+logic            xtr_ge;                   // sig >= sqrt(2): m = sig/2, k + 1
+logic [15:0]     xtr_u;                    // k + 2^15
 x87_reg_t        poly_aux;                 // cos(x) for FPTAN and FSINCOS
 x87_reg_t        poly_opa;
 x87_reg_t        poly_scratch [0:15];      // temporaries (x87_reg_t, no conversion)
@@ -290,7 +303,7 @@ logic            poly_we;
 logic [3:0]      poly_waddr;
 x87_reg_t        poly_wdata;
 logic [3:0]      poly_saddr;
-logic [5:0]      poly_caddr;
+logic [6:0]      poly_caddr;
 x87_reg_t     fptan_push_value;          // Value pushed after the ST0 write (1.0 or cos).
 typedef enum logic [2:0] {
     FPREM_IDLE,
@@ -381,7 +394,7 @@ wire poly_active = (poly_phase != POLY_IDLE);
 wire poly_internal = poly_active && !poly_final;
 wire poly_final_done = v2_exec_math_done && poly_final;
 wire trans_done = (trans_exec_done && !trans_compute) || poly_final_done;
-wire trans_inexact = v2_exec_inexact || poly_final_done;
+wire trans_inexact = v2_exec_inexact || (poly_final_done && !poly_exact);
 wire trans_denormal_operand = v2_exec_denormal_operand ||
                               (poly_final_done && poly_denormal);
 x87_reg_t trans_aux;
@@ -1222,6 +1235,21 @@ x87_logexp_rom logexp_rom (
     .q(logexp_data)
 );
 
+// XTR's two results: m (with A's guard, round and sticky) and 2^27 + 2^15 + k.
+x87_reg_t xtr_m, xtr_t;
+always_comb begin
+    xtr_m = '0;
+    xtr_m.exp = xtr_ge ? 15'h3ffe : 15'h3fff;
+    xtr_m.sig = xtr_sig;
+    xtr_m.guard_bit = xtr_guard;
+    xtr_m.round_bit = xtr_round;
+    xtr_m.sticky_bit = xtr_sticky;
+    xtr_m.class_id = X87_NORMAL;
+    xtr_t = '0;
+    xtr_t.exp = 15'h3fff + 15'd27;
+    xtr_t.sig = {1'b1, 11'h0, xtr_u, 25'h0};
+    xtr_t.class_id = X87_NORMAL;
+end
 // Scratch writes: the two inputs when a program starts, then each result.
 always_comb begin
     poly_we = 1'b0;
@@ -1238,6 +1266,14 @@ always_comb begin
         poly_we = 1'b1;
         poly_waddr = poly_word.dest;
         poly_wdata = v2_exec_result;
+    end else if (poly_phase == POLY_XTR_M) begin
+        poly_we = 1'b1;
+        poly_waddr = poly_word.dest;
+        poly_wdata = xtr_m;
+    end else if (poly_phase == POLY_XTR_K) begin
+        poly_we = 1'b1;
+        poly_waddr = poly_word.b_index[3:0];
+        poly_wdata = xtr_t;
     end
 end
 // Operand reads: A while the predicate is checked, B the cycle after; while
@@ -1248,10 +1284,10 @@ wire poly_fetch_reads = (poly_phase == POLY_WAIT) && (pf_state == PF_PRED);
 wire poly_read_b = (poly_phase == POLY_FETCH_B) ||
                    ((poly_phase == POLY_WAIT) && (pf_state == PF_CAPA));
 assign poly_read_word = (poly_phase == POLY_WAIT) ? pf_word : poly_word;
-wire [5:0] poly_read_ca = poly_read_word.a_index +
-                          (poly_read_word.a_id ? {4'd0, poly_id} : 6'd0);
-wire [5:0] poly_read_cb = poly_read_word.b_index +
-                          (poly_read_word.b_id ? {4'd0, poly_id} : 6'd0);
+wire [6:0] poly_read_ca = poly_read_word.a_index +
+                          (poly_read_word.a_id ? {5'd0, poly_id} : 7'd0);
+wire [6:0] poly_read_cb = poly_read_word.b_index +
+                          (poly_read_word.b_id ? {5'd0, poly_id} : 7'd0);
 always_comb begin
     if (poly_read_b) begin
         poly_saddr = poly_read_word.b_index[3:0];
@@ -1283,9 +1319,17 @@ assign pf_opb_read = pf_word.b_const ? poly_const_q : poly_scratch_q;
 // The fetched word reads the slot the running operation writes at done.
 wire pf_forward_a = !pf_word.a_const && (pf_word.a_index[3:0] == poly_word.dest);
 wire pf_forward_b = !pf_word.b_const && (pf_word.b_index[3:0] == poly_word.dest);
+// Operand modifiers: truncation to the top 13 significand bits (the
+// programs' exact products), then |A| or -A, |B|.
 function automatic x87_reg_t poly_a_sign(input x87_reg_t value, input x87_poly_word_t word);
     x87_reg_t r;
     r = value;
+    if (word.a_trunc) begin
+        r.sig[39:0] = 40'h0;
+        r.guard_bit = 1'b0;
+        r.round_bit = 1'b0;
+        r.sticky_bit = 1'b0;
+    end
     if (word.a_abs)
         r.sign = 1'b0;
     else if (word.a_neg)
@@ -1295,6 +1339,12 @@ endfunction
 function automatic x87_reg_t poly_b_sign(input x87_reg_t value, input x87_poly_word_t word);
     x87_reg_t r;
     r = value;
+    if (word.b_trunc) begin
+        r.sig[39:0] = 40'h0;
+        r.guard_bit = 1'b0;
+        r.round_bit = 1'b0;
+        r.sticky_bit = 1'b0;
+    end
     if (word.b_abs)
         r.sign = 1'b0;
     return r;
@@ -1316,7 +1366,7 @@ function automatic logic poly_fetch_behind(input x87_poly_word_t word);
 endfunction
 // The word after the one issuing (ISSUE) or after pf_word (issue at done, a
 // skipped word), read as an operation issues.
-wire [6:0] pf_next_pc = (poly_phase == POLY_ISSUE) ? poly_pc + 7'd1 : pf_pc + 7'd1;
+wire [7:0] pf_next_pc = (poly_phase == POLY_ISSUE) ? poly_pc + 8'd1 : pf_pc + 8'd1;
 x87_poly_word_t pf_next_word;
 assign pf_next_word = x87_poly_word_t'(x87_poly_word(pf_next_pc));
 assign poly_opa_read = poly_word.a_const ? poly_const_q : poly_scratch_q;
@@ -1459,10 +1509,10 @@ always_ff @(posedge clk) begin
         fptan_sincos <= 1'b0;
         fptan_push_value <= x87_one();
         poly_phase <= POLY_IDLE;
-        poly_pc <= 7'd0;
+        poly_pc <= 8'd0;
         poly_word <= '0;
         pf_state <= PF_IDLE;
-        pf_pc <= 7'd0;
+        pf_pc <= 8'd0;
         pf_word <= '0;
         pf_opa <= x87_empty();
         pf_opb <= x87_empty();
@@ -1474,6 +1524,15 @@ always_ff @(posedge clk) begin
         poly_cosine <= 1'b0;
         poly_final <= 1'b0;
         poly_denormal <= 1'b0;
+        poly_k0 <= 1'b1;
+        poly_exact <= 1'b0;
+        xtr_sig <= 53'h0;
+        xtr_guard <= 1'b0;
+        xtr_round <= 1'b0;
+        xtr_sticky <= 1'b0;
+        xtr_exp <= 17'sd0;
+        xtr_ge <= 1'b0;
+        xtr_u <= 16'h0;
         poly_aux <= x87_one();
         poly_opa <= x87_empty();
         fprem_phase <= FPREM_IDLE;
@@ -2002,6 +2061,8 @@ always_ff @(posedge clk) begin
         if (trans_compute) begin
             poly_phase <= POLY_LOAD_B;
             poly_pc <= trans_atan2 ? X87_POLY_ENTRY_ATAN : X87_POLY_ENTRY_SINCOS;
+            poly_k0 <= 1'b1;
+            poly_exact <= 1'b0;
             poly_quadrant <= 2'd0;
             poly_swap <= 1'b0;
             poly_id <= 2'd0;
@@ -2021,31 +2082,34 @@ always_ff @(posedge clk) begin
             end
             POLY_FETCH_A: begin
                 if (x87_poly_pred(poly_word.pred, poly_quadrant, poly_cosine,
-                                  poly_swap, poly_xneg, poly_yneg)) begin
+                                  poly_swap, poly_xneg, poly_yneg, poly_id, poly_k0)) begin
                     poly_phase <= POLY_FETCH_B;
                 end else begin
-                    poly_pc <= poly_pc + 7'd1;
+                    poly_pc <= poly_pc + 8'd1;
                     poly_phase <= POLY_DECODE;
                 end
             end
             POLY_FETCH_B: begin
-                poly_opa <= poly_opa_read;
-                if (poly_word.a_abs)
-                    poly_opa.sign <= 1'b0;
-                else if (poly_word.a_neg)
-                    poly_opa.sign <= !poly_opa_read.sign;
+                poly_opa <= poly_a_sign(poly_opa_read, poly_word);
                 poly_phase <= POLY_ISSUE;
             end
             POLY_ISSUE: begin
                 if (poly_word.op == X87_POLY_OP_AUX) begin
                     poly_aux <= poly_opa;
-                    poly_pc <= poly_pc + 7'd1;
+                    poly_pc <= poly_pc + 8'd1;
                     poly_phase <= POLY_DECODE;
+                end else if (poly_word.op == X87_POLY_OP_XTR) begin
+                    // A positive normal or denormal (exponent 0: effectively 1).
+                    xtr_sig <= poly_opa.sig;
+                    xtr_guard <= poly_opa.guard_bit;
+                    xtr_round <= poly_opa.round_bit;
+                    xtr_sticky <= poly_opa.sticky_bit;
+                    xtr_exp <= (poly_opa.class_id == X87_DENORMAL)
+                             ? 17'sd1 : $signed({2'b00, poly_opa.exp});
+                    poly_phase <= POLY_XTR_NORM;
                 end else begin
                     arith_operand_a <= poly_opa;
-                    arith_operand_b <= poly_opb_read;
-                    if (poly_word.b_abs)
-                        arith_operand_b.sign <= 1'b0;
+                    arith_operand_b <= poly_b_sign(poly_opb_read, poly_word);
                     v2_exec_op <= poly_exec_op(poly_word.op);
                     v2_exec_owner <= EXEC_MATH;
                     v2_exec_size <= 2'd0;
@@ -2094,7 +2158,7 @@ always_ff @(posedge clk) begin
                                 ? 2'd0 - poly_round_low3[1:0]
                                 : poly_round_low3[1:0];
                         // Words the fetch skipped do not run.
-                        poly_pc <= (pf_state == PF_IDLE) ? poly_pc + 7'd1 : pf_pc;
+                        poly_pc <= (pf_state == PF_IDLE) ? poly_pc + 8'd1 : pf_pc;
                         poly_phase <= POLY_DECODE;
                         pf_state <= PF_IDLE;
                     end
@@ -2102,10 +2166,12 @@ always_ff @(posedge clk) begin
                     case (pf_state)
                         PF_PRED: begin
                             if (!x87_poly_pred(pf_word.pred, poly_quadrant, poly_cosine,
-                                               poly_swap, poly_xneg, poly_yneg)) begin
+                                               poly_swap, poly_xneg, poly_yneg,
+                                               poly_id, poly_k0)) begin
                                 pf_pc <= pf_next_pc;
                                 pf_word <= pf_next_word;
-                            end else if (pf_word.op == X87_POLY_OP_AUX) begin
+                            end else if ((pf_word.op == X87_POLY_OP_AUX) ||
+                                         (pf_word.op == X87_POLY_OP_XTR)) begin
                                 pf_state <= PF_STOP;
                             end else begin
                                 pf_state <= (pf_word.a_const != pf_word.b_const)
@@ -2128,6 +2194,32 @@ always_ff @(posedge clk) begin
                         default: ;
                     endcase
                 end
+            end
+            // XTR: A = sig/2^52 * 2^(exp - 16383) once sig[52] is set (a
+            // denormal shifts left, bounded); m = sig/2^52, or sig/2^53 and
+            // k + 1 when sig >= sqrt(2). x = 2^k exactly: PE only if the
+            // final rounding is inexact.
+            POLY_XTR_NORM: begin
+                if (!xtr_sig[52] && (xtr_exp > -17'sd64)) begin
+                    xtr_sig <= {xtr_sig[51:0], xtr_guard};
+                    xtr_guard <= xtr_round;
+                    xtr_round <= xtr_sticky;
+                    xtr_exp <= xtr_exp - 17'sd1;
+                end else begin
+                    xtr_ge <= xtr_sig >= X87_POLY_SQRT2_SIG;
+                    poly_exact <= (xtr_sig == {1'b1, 52'h0}) &&
+                                  !xtr_guard && !xtr_round && !xtr_sticky;
+                    poly_phase <= POLY_XTR_M;
+                end
+            end
+            POLY_XTR_M: begin                      // m into dest; k + 2^15
+                xtr_u <= 16'(xtr_exp + $signed({16'd0, xtr_ge}) + 17'sd16385);
+                poly_phase <= POLY_XTR_K;
+            end
+            POLY_XTR_K: begin                      // 2^27 + 2^15 + k into B's slot
+                poly_k0 <= xtr_u == 16'h8000;
+                poly_pc <= poly_pc + 8'd1;
+                poly_phase <= POLY_DECODE;
             end
             default: ;
         endcase
