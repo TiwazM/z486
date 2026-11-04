@@ -2761,7 +2761,8 @@ always_ff @(posedge clk) begin
             DEST_MDTMP4: ;  // Private multiply/divide registers
 
             DEST_CR0: begin
-                CR0 <= external_dest_value;
+                // ET is hardwired to 1 on the Intel486 (writable on the 386).
+                CR0 <= external_dest_value | 32'h0000_0010;
                 // Entering protected mode makes CPL 0 until a later control
                 // transfer establishes a different visible CS RPL.
                 if (external_dest_value[0] && !CR0[0])
