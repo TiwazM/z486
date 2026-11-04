@@ -28,6 +28,7 @@ module x87_unit #(
     input  logic        store_word,         // The store overlay's command/result word is current.
     input  logic        store_go,           // ...and its destination check completed (no memory stall).
     input  logic        store_exec,         // ...and executes.
+    input  logic        next_part,          // An X87_NEXT word (a part's WR) executed.
     output logic        store_opr_commit,   // Write store_opr_data to OPR_R.
     output logic        store_record,       // A direct store records FIP/FCS:FOP/operand.
     output logic        store_hold,         // Hold the ROM at the store word until the result is in.
@@ -58,9 +59,12 @@ module x87_unit #(
 wire        l_reg = launch_fop[7:6] == 2'b11;
 wire  [2:0] l_esc = launch_fop[10:8];          // D8 + l_esc
 wire  [2:0] l_op  = launch_fop[5:3];           // ModR/M.reg
-// Stores: FST/FSTP m32 and FIST/FISTP m32 (D9, DB /2 /3).
-wire        l_store = !l_reg && ((l_esc == 3'd1) || (l_esc == 3'd3)) &&
-                      (l_op[2:1] == 2'b01);
+// Stores: FST/FSTP m32, FIST/FISTP m32, FST/FSTP m64 and FIST/FISTP m16
+// (D9, DB, DD, DF /2 /3), FSTP m80 (DB /7), FBSTP (DF /6), FISTP m64 (DF /7).
+wire        l_m80 = (l_op == 3'd7) ? (l_esc == 3'd3) : (l_op == 3'd6) && (l_esc == 3'd7);
+wire        l_m64 = (l_op == 3'd7) ? (l_esc == 3'd7) : (l_esc == 3'd5) && (l_op[2:1] == 2'b01);
+wire        l_store = !l_reg && ((l_esc[0] && (l_op[2:1] == 2'b01)) || l_m80 || l_m64);
+wire  [1:0] l_parts = l_m80 ? 2'd3 : l_m64 ? 2'd2 : 2'd1;
 // Loads whose RD words hand in the operand (x87-m16/m64/m80-load): DC-DF
 // memory forms and DB /5; the m32 loads use direct_mem_req.
 wire        l_operand = !l_reg && !l_store &&
@@ -105,16 +109,26 @@ logic        posted_pending;       // The bridge holds a posted write.
 logic        br_accepted, br_complete;
 logic        br_read_complete;
 logic [31:0] br_rdata;
-// Stores: in the store word, after the destination check, post the FOP as a
-// command, then take the result from the x87's transfer queue as it is
-// produced (result_pop: no data-port read through the bridge). The store
-// word holds until the result is in; OPR_R takes it the cycle the hold ends
-// (ST_DONE), and the WR word after the store word writes it to memory.
+// Stores: the overlay checks the whole destination for writing first (CW
+// words, so nothing after the command can fault). In the store word, post
+// the FOP as a command, then take the result from the x87's transfer queue
+// as it is produced (result_pop: no data-port read through the bridge), in
+// the parts the 80386 routine reads and writes: one (m16, m32), two dwords
+// (m64) or two dwords and the two-byte tail (m80). The store word holds
+// until the last part is in; OPR_R takes the first part the cycle the hold
+// ends (ST_DONE), and the WR word after the store word writes it to memory.
+// A part's WR word is an X87_NEXT word: the cycle after it, OPR_R takes the
+// next part for the next WR.
 typedef enum logic [1:0] {ST_IDLE, ST_CMD, ST_READ, ST_DONE} st_state_t;
 st_state_t   st_state;
 logic        direct_st_r;          // The issued instruction took the store path.
-logic [31:0] st_part0_r;           // The result, for OPR_R.
-logic        st_commit_r;          // ST_DONE's first cycle: OPR_R takes st_part0_r.
+logic  [1:0] st_parts_r;           // Result parts of the store.
+logic  [1:0] st_taken_r;           // ...taken from the x87 so far.
+logic [31:0] st_part0_r;           // The part for OPR_R...
+logic [31:0] st_part1_r;           // ...and the parts after it.
+logic [15:0] st_part2_r;
+logic        st_commit_r;          // OPR_R takes st_part0_r: ST_DONE's first
+                                   // cycle, and the cycle after an X87_NEXT word.
 wire         st_cmd = direct_st_r && store_go && !cancel &&
                       (st_state == ST_IDLE || st_state == ST_CMD);
 wire         result_pop = (st_state == ST_READ);
@@ -130,7 +144,7 @@ assign load_commit = direct_release;
 assign direct_mem_req = direct_active && !direct_issued_r && !direct_data_valid_r;
 assign store_hold = direct_st_r && store_word && (st_state != ST_DONE);
 assign store_opr_commit = st_commit_r;
-assign store_record = st_commit_r;
+assign store_record = st_commit_r && (st_state == ST_DONE);
 assign store_opr_data = st_part0_r;
 assign direct_stall = ((direct_active || op_post_r) && !direct_release) || store_hold;
 
@@ -226,7 +240,11 @@ always_ff @(posedge clk) begin
     if (!reset_n) begin
         direct_st_r         <= 1'b0;
         st_state            <= ST_IDLE;
+        st_parts_r          <= 2'd1;
+        st_taken_r          <= 2'd0;
         st_part0_r          <= 32'h0;
+        st_part1_r          <= 32'h0;
+        st_part2_r          <= 16'h0;
         st_commit_r         <= 1'b0;
         direct_reg_r        <= 1'b0;
         dcmd_pending_r      <= 1'b0;
@@ -269,12 +287,26 @@ always_ff @(posedge clk) begin
             ST_IDLE: if (st_cmd) st_state <= br_accepted ? ST_READ : ST_CMD;
             ST_CMD:  if (br_accepted) st_state <= ST_READ;
             ST_READ: if (result_valid) begin
-                st_part0_r  <= result_data;
-                st_commit_r <= 1'b1;
-                st_state    <= ST_DONE;
+                case (st_taken_r)
+                    2'd0:    st_part0_r <= result_data;
+                    2'd1:    st_part1_r <= result_data;
+                    default: st_part2_r <= result_data[15:0];
+                endcase
+                st_taken_r <= st_taken_r + 2'd1;
+                if (st_taken_r + 2'd1 == st_parts_r) begin
+                    st_commit_r <= 1'b1;
+                    st_state    <= ST_DONE;
+                end
             end
             ST_DONE: if (store_exec) st_state <= ST_IDLE;
         endcase
+        // A part's WR has taken OPR_R (its write data is in paging's
+        // request): OPR_R takes the next part for the next WR.
+        if (direct_st_r && next_part) begin
+            st_part0_r  <= st_part1_r;
+            st_part1_r  <= {16'h0, st_part2_r};
+            st_commit_r <= 1'b1;
+        end
 
         if (direct_launch) begin
             direct_active       <= ENABLE_X87 && direct_candidate && !l_reg &&
@@ -292,6 +324,8 @@ always_ff @(posedge clk) begin
                                  direct_allowed && error_n && (busy_n || queue_safe) &&
                                  !dcmd_pending_r;
             st_state            <= ST_IDLE;
+            st_parts_r          <= l_parts;
+            st_taken_r          <= 2'd0;
             direct_reg_r        <= ENABLE_X87 && direct_candidate && l_reg &&
                                  direct_allowed && error_n && (busy_n || queue_safe) &&
                                  !posted_pending && !dcmd_pending_r;
@@ -331,6 +365,12 @@ always_ff @(posedge clk) begin
         end
     end
 end
+
+// synthesis translate_off
+always_ff @(posedge clk)
+    if (reset_n && direct_st_r && (st_state == ST_DONE) && result_valid)
+        $error("x87 store result has more parts than its overlay writes");
+// synthesis translate_on
 
 `ifdef Z486_COSIM
 // Co-simulation: the x87 has no command, transfer or result in flight, so its

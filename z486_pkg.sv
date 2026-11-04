@@ -882,6 +882,7 @@ localparam DEST_USTEP_INVLPG = 7'h70;    // 486 single-page TLB invalidation
 localparam DEST_USTEP_X87_STORE = 7'h71; // x87 store overlay: command + result read into OPR_R
 localparam DEST_USTEP_X87_OPERAND = 7'h72; // x87 load overlay: OPR_R is the next operand part
 localparam DEST_USTEP_X87_POST = 7'h73;  // x87 load overlay: OPR_R is the last part; post the load
+localparam DEST_USTEP_X87_NEXT = 7'h74;  // x87 store overlay: OPR_R takes the next result part
 localparam DEST_LATTTF = 7'h78;  // Faulting linear address (page fault)
 localparam DEST_PFERRC = 7'h7A;  // Page fault error code
 localparam DEST_PDBR = 7'h7B;    // Page directory base register (CR3) for LPCR reads

@@ -56,7 +56,10 @@ The generated 40-bit ROM image stores the D2 early kind in bits 39:37.
 | `x87-m16-load` | `4E0` | `A16` | `X87_OVERLAY` | `A16 A17 A18 A19 A1A A1B A1C A1D` | ea, paging, x87-order |
 | `x87-reg` | `4C1` | `9D1` | `X87_OVERLAY` | `9D1 9D2` | x87-order |
 | `x87-st-m32` | `53C` | `9D3` | `X87_OVERLAY` | `9D3 9D4 9D5 9D6 9D7 9D8` | ea, paging, x87-order |
+| `x87-st-m64` | `540` | `A20` | `X87_OVERLAY` | `A20 A21 A22 A23 A24 A25 A26 A27 A28 A29` | ea, paging, x87-order |
+| `x87-st-m80` | `538` | `A2A` | `X87_OVERLAY` | `A2A A2B A2C A2D A2E A2F A30 A31 A32 A33 A34 A35 A36 A37 A38` | ea, paging, x87-order |
+| `x87-st-m16` | `544` | `A3A` | `X87_OVERLAY` | `A3A A3B A3C A3D A3E A3F` | ea, paging, x87-order |
 | `rmw-m-r-fast` | `04A` | `9CB` | `RMW_FAST` | `9CB 9CC 9CD` | ea, paging, store-order |
 | `rmw-unary-fast` | `04E` | `9CE` | `RMW_FAST` | `9CE 9CF 9D0` | ea, paging, store-order |
 
-Qualified overlays: 8.
+Qualified overlays: 11.

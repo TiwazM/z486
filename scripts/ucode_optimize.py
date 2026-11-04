@@ -100,7 +100,7 @@ class OverlayQualifier(IntEnum):
     RMW_UNARY = 3
     X87_REG = 4
     X87_ST_M32 = 5
-    X87_MEM_LOAD = 6
+    X87_MEM = 6
 
 
 class RecipeAction(IntEnum):
@@ -376,11 +376,98 @@ PATCHES = [
           copy_from=0x20E, fields=dict(aluop=ALUJMP_BITS32)),
     Patch(0x9D5, "x87 m32 store overlay: check the destination for writing",
           copy_from=0x030, fields=dict(bus=0x0A)),
-    Patch(0x9D6, "x87 m32 store overlay: after the check (DLY), command and result read into OPR_R",
+    Patch(0x9D6, "x87 m32 store overlay: after the check (DLY), command and result into OPR_R",
           copy_from=0x030, fields=dict(dst=DEST_USTEP_X87_STORE, sub=0)),
     Patch(0x9D7, "x87 m32 store overlay: write the result back and retire",
           copy_from=0x0AE, fields=dict(op=0)),
     Patch(0x9D8, "x87 m32 store overlay: RNI delay slot waits for the write",
+          copy_from=0x047),
+
+    # The other x87 stores (540 m64: DD /2 /3 FST/FSTP, DF /7 FISTP; 538 m80:
+    # DB /7 FSTP, DF /6 FBSTP; 544 m16: DF /2 /3 FIST/FISTP) write their
+    # result in the parts the 386 routine writes (its loop at 56C-574, the
+    # m80 tail at 579-57B), low part first: dwords, and the m80 tail and the
+    # m16 operand as BITS16 words.
+    # First every part is checked for writing (CW, IND += 4 between parts),
+    # so the whole destination, a page-crossing one too (each CW checks both
+    # pages of its part), is limit-checked and translated before the x87 sees
+    # anything: a fault on any part restarts the instruction with memory and
+    # the x87 untouched (FSTP has not popped). The CW words cover exactly the
+    # operand's bytes. The store word (X87_STORE, a DLY after the last check)
+    # rewinds IND to the operand while the hardware posts the FOP and takes
+    # the result parts; OPR_R holds the first part when it ends. Each part's
+    # WR is an X87_NEXT word, after which OPR_R holds the next part, and the
+    # DLY after it moves IND on. No write can fault: every byte was checked.
+    # The fallback point sets the operand size, which the original routine
+    # sets again (53A/542/546) before it uses it.
+    Patch(0xA20, "x87 m64 store overlay: fallback point, dword parts",
+          copy_from=0x030, fields=dict(aluop=ALUJMP_BITS32)),
+    Patch(0xA21, "x87 m64 store overlay: fallback delay slot",
+          copy_from=0x20E),
+    Patch(0xA22, "x87 m64 store overlay: check part 0 for writing",
+          copy_from=0x030, fields=dict(bus=BUS_CW)),
+    Patch(0xA23, "x87 m64 store overlay: DLY, IND += 4",
+          copy_from=0x030, fields=dict(sub=0, bus=BUS_IND_PLUS, alusrc=ALUSRC_CONST_4)),
+    Patch(0xA24, "x87 m64 store overlay: check part 1 for writing",
+          copy_from=0x030, fields=dict(bus=BUS_CW)),
+    Patch(0xA25, "x87 m64 store overlay: DLY, IND -= 4, command and result parts",
+          copy_from=0x030, fields=dict(sub=0, bus=BUS_IND_PLUS, alusrc=ALUSRC_CONST_NEG4,
+                                       dst=DEST_USTEP_X87_STORE)),
+    Patch(0xA26, "x87 m64 store overlay: WR part 0, part 1 to OPR_R",
+          copy_from=0x0AE, fields=dict(dst=DEST_USTEP_X87_NEXT)),
+    Patch(0xA27, "x87 m64 store overlay: DLY, IND += 4",
+          copy_from=0x030, fields=dict(sub=0, bus=BUS_IND_PLUS, alusrc=ALUSRC_CONST_4)),
+    Patch(0xA28, "x87 m64 store overlay: WR part 1 and retire",
+          copy_from=0x0AE, fields=dict(op=0)),
+    Patch(0xA29, "x87 m64 store overlay: RNI delay slot waits for the write",
+          copy_from=0x047),
+
+    Patch(0xA2A, "x87 m80 store overlay: fallback point, dword parts",
+          copy_from=0x030, fields=dict(aluop=ALUJMP_BITS32)),
+    Patch(0xA2B, "x87 m80 store overlay: fallback delay slot",
+          copy_from=0x20E),
+    Patch(0xA2C, "x87 m80 store overlay: check part 0 for writing",
+          copy_from=0x030, fields=dict(bus=BUS_CW)),
+    Patch(0xA2D, "x87 m80 store overlay: DLY, IND += 4",
+          copy_from=0x030, fields=dict(sub=0, bus=BUS_IND_PLUS, alusrc=ALUSRC_CONST_4)),
+    Patch(0xA2E, "x87 m80 store overlay: check part 1 for writing",
+          copy_from=0x030, fields=dict(bus=BUS_CW)),
+    Patch(0xA2F, "x87 m80 store overlay: DLY, IND += 4, word tail",
+          copy_from=0x030, fields=dict(sub=0, bus=BUS_IND_PLUS, alusrc=ALUSRC_CONST_4,
+                                       aluop=ALUJMP_BITS16)),
+    Patch(0xA30, "x87 m80 store overlay: check the tail for writing",
+          copy_from=0x030, fields=dict(bus=BUS_CW)),
+    Patch(0xA31, "x87 m80 store overlay: DLY, IND -= 4, dword parts",
+          copy_from=0x030, fields=dict(sub=0, bus=BUS_IND_PLUS, alusrc=ALUSRC_CONST_NEG4,
+                                       aluop=ALUJMP_BITS32)),
+    Patch(0xA32, "x87 m80 store overlay: DLY, IND -= 4, command and result parts",
+          copy_from=0x030, fields=dict(sub=0, bus=BUS_IND_PLUS, alusrc=ALUSRC_CONST_NEG4,
+                                       dst=DEST_USTEP_X87_STORE)),
+    Patch(0xA33, "x87 m80 store overlay: WR part 0, part 1 to OPR_R",
+          copy_from=0x0AE, fields=dict(dst=DEST_USTEP_X87_NEXT)),
+    Patch(0xA34, "x87 m80 store overlay: DLY, IND += 4",
+          copy_from=0x030, fields=dict(sub=0, bus=BUS_IND_PLUS, alusrc=ALUSRC_CONST_4)),
+    Patch(0xA35, "x87 m80 store overlay: WR part 1, the tail to OPR_R",
+          copy_from=0x0AE, fields=dict(dst=DEST_USTEP_X87_NEXT)),
+    Patch(0xA36, "x87 m80 store overlay: DLY, IND += 4, word tail",
+          copy_from=0x030, fields=dict(sub=0, bus=BUS_IND_PLUS, alusrc=ALUSRC_CONST_4,
+                                       aluop=ALUJMP_BITS16)),
+    Patch(0xA37, "x87 m80 store overlay: WR the tail and retire",
+          copy_from=0x0AE, fields=dict(op=0)),
+    Patch(0xA38, "x87 m80 store overlay: RNI delay slot waits for the write",
+          copy_from=0x047),
+
+    Patch(0xA3A, "x87 m16 store overlay: fallback point, word destination",
+          copy_from=0x030, fields=dict(aluop=ALUJMP_BITS16)),
+    Patch(0xA3B, "x87 m16 store overlay: fallback delay slot",
+          copy_from=0x20E),
+    Patch(0xA3C, "x87 m16 store overlay: check the destination for writing",
+          copy_from=0x030, fields=dict(bus=BUS_CW)),
+    Patch(0xA3D, "x87 m16 store overlay: DLY, command and result",
+          copy_from=0x030, fields=dict(sub=0, dst=DEST_USTEP_X87_STORE)),
+    Patch(0xA3E, "x87 m16 store overlay: WR the result and retire",
+          copy_from=0x0AE, fields=dict(op=0)),
+    Patch(0xA3F, "x87 m16 store overlay: RNI delay slot waits for the write",
           copy_from=0x047),
 
     # Cached RMW alternate entries. RD_FAST/WR_FAST are semantic actions owned
@@ -696,17 +783,17 @@ OVERLAY_RECIPES = [
                   ("ea", "paging", "x87-order")),
     OverlayRecipe("x87-m64-load", 0x4DB, 0xA00, EarlyKind.SEQ,
                   (0xA00, 0xA01, 0xA02, 0xA03, 0xA04, 0xA05, 0xA06, 0xA07,
-                   0xA08, 0xA09), OverlayQualifier.X87_MEM_LOAD,
+                   0xA08, 0xA09), OverlayQualifier.X87_MEM,
                   RecipeAction.X87_OVERLAY, "x87-direct-operand",
                   ("ea", "paging", "x87-order"), True),
     OverlayRecipe("x87-m80-load", 0x4D3, 0xA0A, EarlyKind.SEQ,
                   (0xA0A, 0xA0B, 0xA0C, 0xA0D, 0xA0E, 0xA0F, 0xA10, 0xA11,
-                   0xA12, 0xA13, 0xA14, 0xA15), OverlayQualifier.X87_MEM_LOAD,
+                   0xA12, 0xA13, 0xA14, 0xA15), OverlayQualifier.X87_MEM,
                   RecipeAction.X87_OVERLAY, "x87-direct-operand",
                   ("ea", "paging", "x87-order"), True),
     OverlayRecipe("x87-m16-load", 0x4E0, 0xA16, EarlyKind.SEQ,
                   (0xA16, 0xA17, 0xA18, 0xA19, 0xA1A, 0xA1B, 0xA1C, 0xA1D),
-                  OverlayQualifier.X87_MEM_LOAD,
+                  OverlayQualifier.X87_MEM,
                   RecipeAction.X87_OVERLAY, "x87-direct-operand",
                   ("ea", "paging", "x87-order"), True),
     OverlayRecipe("x87-reg", 0x4C1, 0x9D1, EarlyKind.NONE,
@@ -715,6 +802,22 @@ OVERLAY_RECIPES = [
                   ("x87-order",)),
     OverlayRecipe("x87-st-m32", 0x53C, 0x9D3, EarlyKind.SEQ,
                   (0x9D3, 0x9D4, 0x9D5, 0x9D6, 0x9D7, 0x9D8), OverlayQualifier.X87_ST_M32,
+                  RecipeAction.X87_OVERLAY, "x87-direct-store",
+                  ("ea", "paging", "x87-order"), True),
+    OverlayRecipe("x87-st-m64", 0x540, 0xA20, EarlyKind.SEQ,
+                  (0xA20, 0xA21, 0xA22, 0xA23, 0xA24, 0xA25, 0xA26, 0xA27,
+                   0xA28, 0xA29), OverlayQualifier.X87_MEM,
+                  RecipeAction.X87_OVERLAY, "x87-direct-store",
+                  ("ea", "paging", "x87-order"), True),
+    OverlayRecipe("x87-st-m80", 0x538, 0xA2A, EarlyKind.SEQ,
+                  (0xA2A, 0xA2B, 0xA2C, 0xA2D, 0xA2E, 0xA2F, 0xA30, 0xA31,
+                   0xA32, 0xA33, 0xA34, 0xA35, 0xA36, 0xA37, 0xA38),
+                  OverlayQualifier.X87_MEM,
+                  RecipeAction.X87_OVERLAY, "x87-direct-store",
+                  ("ea", "paging", "x87-order"), True),
+    OverlayRecipe("x87-st-m16", 0x544, 0xA3A, EarlyKind.SEQ,
+                  (0xA3A, 0xA3B, 0xA3C, 0xA3D, 0xA3E, 0xA3F),
+                  OverlayQualifier.X87_MEM,
                   RecipeAction.X87_OVERLAY, "x87-direct-store",
                   ("ea", "paging", "x87-order"), True),
     OverlayRecipe("rmw-m-r-fast", 0x04A, 0x9CB, EarlyKind.RMW,
@@ -857,8 +960,8 @@ def validate_recipes(words: list[int]) -> None:
             raise ValueError(f"overlay {recipe.name}: source and overlay entries match")
         if recipe.action == RecipeAction.NONE:
             raise ValueError(f"overlay {recipe.name}: invalid action {recipe.action}")
-        if not 1 <= len(recipe.targets) <= 12 or recipe.targets[0] != recipe.entry:
-            raise ValueError(f"overlay {recipe.name}: target must be 1..12 words from its entry")
+        if not 1 <= len(recipe.targets) <= 16 or recipe.targets[0] != recipe.entry:
+            raise ValueError(f"overlay {recipe.name}: target must be 1..16 words from its entry")
         for addr in recipe.targets:
             if not 0 <= addr < ROM_DEPTH or words[addr] == default_word:
                 raise ValueError(f"overlay {recipe.name}: invalid target word 0x{addr:03X}")
@@ -935,7 +1038,7 @@ def render_recipe_svh(words: list[int]) -> str:
         if recipe.qualifier == OverlayQualifier.X87_M32_LOAD:
             return "(opcode == 8'hD8) || (opcode == 8'hDA) || " \
                    "(((opcode == 8'hD9) || (opcode == 8'hDB)) && (modrm[5:3] == 3'd0))"
-        if recipe.qualifier == OverlayQualifier.X87_MEM_LOAD:
+        if recipe.qualifier == OverlayQualifier.X87_MEM:
             return "modrm[7:6] != 2'b11"
         if recipe.qualifier == OverlayQualifier.X87_REG:
             return "modrm[7:6] == 2'b11"

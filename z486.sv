@@ -3131,6 +3131,7 @@ x87_unit #(.ENABLE_X87(ENABLE_X87)) x87 (
     .store_word(uc_active && (uc_dest == DEST_USTEP_X87_STORE)),
     .store_go(uc_active && (uc_dest == DEST_USTEP_X87_STORE) && !stall_mem),
     .store_exec(uc_exec && (uc_dest == DEST_USTEP_X87_STORE)),
+    .next_part(uc_exec && (uc_dest == DEST_USTEP_X87_NEXT)),
     .store_opr_commit(x87_store_opr_commit),
     .store_record(x87_store_record),
     .store_opr_data(x87_store_opr_data),
