@@ -512,6 +512,19 @@ function automatic logic m32_is_normal(input logic [31:0] raw);
     return (raw[30:23] != 8'h00) && (raw[30:23] != 8'hff);
 endfunction
 
+function automatic logic m64_is_normal(input logic [63:0] raw);
+    return (raw[62:52] != 11'h000) && (raw[62:52] != 11'h7ff);
+endfunction
+
+// A normal m64 extends exactly, as the executor's FLD_M64 conversion does it.
+function automatic logic [79:0] normal_m64_to_m80(input logic [63:0] raw);
+    logic [14:0] extended_exp;
+    begin
+        extended_exp = {4'h0, raw[62:52]} + 15'd15360;
+        return {raw[63], extended_exp, 1'b1, raw[51:0], 11'h0};
+    end
+endfunction
+
 function automatic logic [79:0] normal_m32_to_m80(input logic [31:0] raw);
     logic [14:0] extended_exp;
     begin
@@ -2880,11 +2893,23 @@ always_ff @(posedge clk) begin
                 end
                 RX_M64: begin
                     if (rx_byte_count_next >= 4'd8) begin
-                        v2_exec_op <= X87_CONVERT_FLD_M64;
-                        v2_exec_owner <= EXEC_LOAD;
-                        v2_exec_size <= 2'd0;
-                        v2_exec_transfer <= rx_payload_next[63:0];
-                        v2_exec_pending <= 1'b1;
+                        if (m64_is_normal(rx_payload_next[63:0]) &&
+                            !memory_math_pending) begin
+                            // FLD m64 of a normal value pushes now.
+                            push_raw_tagged(normal_m64_to_m80(
+                                rx_payload_next[63:0]), 2'b00);
+                        end else if (m64_is_normal(rx_payload_next[63:0])) begin
+                            push_pending_raw <= normal_m64_to_m80(
+                                rx_payload_next[63:0]);
+                            push_pending_tag <= 2'b00;
+                            push_pending <= 1'b1;
+                        end else begin
+                            v2_exec_op <= X87_CONVERT_FLD_M64;
+                            v2_exec_owner <= EXEC_LOAD;
+                            v2_exec_size <= 2'd0;
+                            v2_exec_transfer <= rx_payload_next[63:0];
+                            v2_exec_pending <= 1'b1;
+                        end
                         rx_kind <= RX_NONE;
                     end
                 end
