@@ -108,12 +108,20 @@ wire  [79:0] direct_data = !op_post_r ? {48'h0, direct_data_r} :
                            (op_parts_r == 2'd1) ? {16'h0, opr_r, op_part0_r} :
                                                   {opr_r[15:0], op_part1_r, op_part0_r};
 // Register forms: the FOP is posted to the bridge as a command write, in the
-// executing instruction's first cycle. Taken only when the 386 routine would
-// post it at once: CR0 allows x87 use, no unmasked exception is pending, the
-// x87 is idle or may queue one command, and the bridge is free (no posted or
-// direct command still waiting), so the bridge accepts it immediately.
+// executing instruction's first cycle. Taken when CR0 allows x87 use and no
+// unmasked exception is pending, and either the 386 routine would post it at
+// once (the x87 is idle or may queue one command, and the bridge is free), or
+// the bridge is taken but will be free soon (queue_short: everything ahead of
+// it is a running arithmetic operation and at most one short command) and
+// every exception is masked and stays masked (no mask load in flight), so
+// nothing queued ahead can raise one. Then the instruction holds in its first
+// word (direct_stall) until the bridge takes the command. The routine would
+// wait for BUSY# instead, taking interrupts while it waits: it still does,
+// whenever the wait could be long.
 logic        direct_reg_r;         // The issued instruction took the register path.
 logic        dcmd_pending_r;       // ...and its command awaits bridge acceptance.
+logic        dcmd_wait;            // ...still, this cycle: the instruction holds.
+logic        queue_short;          // The bridge's command will be taken soon.
 logic        posted_pending;       // The bridge holds a posted write.
 logic        br_accepted, br_complete;
 logic        br_read_complete;
@@ -166,7 +174,9 @@ assign store_hold = direct_st_r && store_word && (st_state != ST_DONE);
 assign store_opr_commit = st_commit_r;
 assign store_record = st_commit_r && (st_state == ST_DONE) && !st_status_r;
 assign store_opr_data = st_part0_r;
-assign direct_stall = ((direct_active || op_post_r) && !direct_release) || store_hold;
+assign dcmd_wait = dcmd_pending_r && !br_accepted;
+assign direct_stall = ((direct_active || op_post_r) && !direct_release) || store_hold ||
+                      dcmd_wait;
 
 generate
 if (ENABLE_X87) begin : gen_x87
@@ -238,6 +248,7 @@ if (ENABLE_X87) begin : gen_x87
         .status_out(status_word), .control_out(control_word),
         .busy_n(ctl_busy_n), .pereq(ctl_pereq), .error_n(error_n),
         .queue_safe(queue_safe), .mask_load_pending(mask_load_pending),
+        .queue_short(queue_short),
         .debug_state(debug_state)
     );
 end else begin : gen_no_x87
@@ -260,6 +271,7 @@ end else begin : gen_no_x87
     assign error_n = 1'b1;
     assign queue_safe = 1'b0;
     assign mask_load_pending = 1'b0;
+    assign queue_short = 1'b0;
     assign direct_ready = 1'b0;
     assign debug_state = 32'h8000_0000;
 end
@@ -374,11 +386,13 @@ always_ff @(posedge clk) begin
             st_parts_r          <= l_parts;
             st_taken_r          <= 2'd0;
             direct_reg_r        <= ENABLE_X87 && direct_candidate && l_regcmd &&
-                                 direct_allowed && error_n && (busy_n || queue_safe) &&
-                                 !posted_pending && !dcmd_pending_r;
+                                 direct_allowed && error_n && !dcmd_pending_r &&
+                                 (((busy_n || queue_safe) && !posted_pending) ||
+                                  (queue_safe && !mask_load_pending && queue_short));
             dcmd_pending_r      <= ENABLE_X87 && direct_candidate && l_regcmd &&
-                                 direct_allowed && error_n && (busy_n || queue_safe) &&
-                                 !posted_pending && !dcmd_pending_r;
+                                 direct_allowed && error_n && !dcmd_pending_r &&
+                                 (((busy_n || queue_safe) && !posted_pending) ||
+                                  (queue_safe && !mask_load_pending && queue_short));
             direct_issued_r     <= 1'b0;
             direct_crossing_r   <= 1'b0;
             direct_data_valid_r <= 1'b0;

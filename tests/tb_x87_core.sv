@@ -40,7 +40,7 @@ x87_control dut (
     .result_pop(1'b0), .result_valid(), .result_data(),
     .status_out(), .control_out(),
     .busy_n(busy_n), .pereq(pereq), .error_n(error_n),
-    .queue_safe(), .mask_load_pending(), .debug_state()
+    .queue_safe(), .mask_load_pending(), .queue_short(), .debug_state()
 );
 
 task automatic send_command(input logic [10:0] fop);

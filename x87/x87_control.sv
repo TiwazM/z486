@@ -47,6 +47,8 @@ module x87_control
     output logic        error_n,                // Active-low unmasked-error status.
     output logic        queue_safe,             // Masked exceptions permit one queued command.
     output logic        mask_load_pending,      // FLDCW, FLDENV or FRSTOR has not loaded its masks.
+    output logic        queue_short,            // A plain operation runs and at most one short
+                                                // command is held: the bridge frees soon.
 
     // Low-rate hardware diagnostics; sampled only by the MiSTer watchdog.
     output logic [31:0] debug_state             // Packed command/executor progress.
@@ -843,6 +845,24 @@ wire command_go = command_pending &&
 assign direct_ready = !direct_pending && !cmd_valid && queue_safe;
 assign cmd_ready = !direct_pending && core_cmd_ready;
 assign quiet = !direct_pending && core_cmd_idle;
+// A command waiting in the bridge is taken behind the running plain operation
+// (at most a divide's 62 cycles), or once it and a held command that is
+// quick or plain itself have dispatched (the held command may be dispatching
+// now): a register command may wait for the bridge then.
+wire held_short = (command_decode.action == X87_CMD_ARITH) ||
+                  (command_decode.action == X87_CMD_FSQRT) ||
+                  (command_decode.action == X87_CMD_FRNDINT) ||
+                  (command_decode.action == X87_CMD_MEMORY_MATH) ||
+                  (command_decode.action == X87_CMD_LOAD) ||
+                  (command_decode.action == X87_CMD_FLD_ST) ||
+                  (command_decode.action == X87_CMD_FXCH) ||
+                  (command_decode.action == X87_CMD_FSTP_ST) ||
+                  (command_decode.action == X87_CMD_FFREE) ||
+                  (command_decode.action == X87_CMD_FCHS) ||
+                  (command_decode.action == X87_CMD_FABS) ||
+                  (command_decode.action == X87_CMD_FXAM) ||
+                  (command_decode.action == X87_CMD_PUSH_CONST);
+assign queue_short = (exec_plain || command_held) && (!command_pending || held_short);
 // A direct operand's later fragments own the transfer queue's input.
 assign word_in_ready = (rx_kind != RX_NONE) && (direct_tail_words == 2'd0) &&
                        transfer_push_ready;
