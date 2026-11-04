@@ -20,3 +20,8 @@ tests/pla_entry_rom.hex
 tests/obj_dir_timing/
 tests/x87_timing_out/
 tests/pla_*.hex
+tests/obj_dir_*/
+tests/singlestep_result.txt
+# Berkeley SoftFloat/TestFloat 3e, cloned and built for run_x87_testfloat80.sh
+tests/testfloat/
+tests/x87_testfloat80_out/

@@ -112,7 +112,7 @@ CPP_PLA4_SRCS := sim_main_pla4.cpp
 PLA4_RTL := $(Z486_DIR)/protection.sv
 
 # Targets
-.PHONY: all build test-simple test-full test-386 test-186 test-protected test-pla4 test-l1-cache test-l1-icache test-memory-order test-x87-bridge test-x87-sequencer test-x87-executor test-x87-testfloat test-x87-fifo test-x87-core test-x87-integration test-x87-integer dhrystone clean help
+.PHONY: all build test-simple test-full test-386 test-186 test-protected test-pla4 test-l1-cache test-l1-icache test-memory-order test-x87-bridge test-x87-sequencer test-x87-executor test-x87-testfloat test-x87-testfloat80 test-x87-fifo test-x87-core test-x87-integration test-x87-integer dhrystone clean help
 
 all: build
 
@@ -245,6 +245,21 @@ obj_dir_x87_testfloat/Vtb_x87_testfloat: \
 		$(X87_DIR)/x87_executor.sv $(CPP_X87_TESTFLOAT_SRCS)
 	@echo "Build complete: obj_dir_x87_testfloat/Vtb_x87_testfloat"
 
+obj_dir_x87_testfloat80/Vtb_x87_testfloat80: \
+		$(X87_DIR)/x87_ucode.svh $(X87_DIR)/x87_entries.svh \
+		$(X87_DIR)/x87_pkg.sv \
+		$(X87_DIR)/x87_ucode_pkg.sv $(X87_DIR)/x87_ucode_rom.sv \
+		$(X87_DIR)/x87_sequencer.sv $(X87_DIR)/x87_executor.sv \
+		tb_x87_testfloat80.sv sim_main_x87_testfloat80.cpp
+	@echo "Building x87 extF80 TestFloat testbench with Verilator..."
+	$(VERILATOR) $(VFLAGS_NOTRACE) --Mdir obj_dir_x87_testfloat80 \
+		--top-module tb_x87_testfloat80 \
+		$(X87_DIR)/x87_pkg.sv $(X87_DIR)/x87_ucode_pkg.sv \
+		tb_x87_testfloat80.sv \
+		$(X87_DIR)/x87_ucode_rom.sv $(X87_DIR)/x87_sequencer.sv \
+		$(X87_DIR)/x87_executor.sv sim_main_x87_testfloat80.cpp
+	@echo "Build complete: obj_dir_x87_testfloat80/Vtb_x87_testfloat80"
+
 obj_dir_x87_core/Vtb_x87_core: $(X87_DIR)/x87_ucode.svh \
 		$(X87_DIR)/x87_entries.svh $(X87_DIR)/x87_pkg.sv \
 		$(X87_DIR)/x87_ucode_pkg.sv \
@@ -335,12 +350,22 @@ test-x87-executor: obj_dir/Vtb_x87_executor
 
 TESTFLOAT_GEN ?= $(CURDIR)/../../qemu/subprojects/berkeley-testfloat-3/build/Linux-x86_64-GCC/testfloat_gen
 X87_TESTFLOAT_CASES ?= 512
+# extF80 TestFloat (run_x87_testfloat80.sh): SoftFloat and TestFloat 3e
+# cloned into tests/testfloat and built there (build/Linux-x86_64-GCC).
+TESTFLOAT_BUILD ?= $(CURDIR)/testfloat/berkeley-testfloat-3/build/Linux-x86_64-GCC
+X87_TESTFLOAT80_LEVEL ?= 1
 
 test-x87-testfloat: obj_dir_x87_testfloat/Vtb_x87_testfloat
 	@echo "Running x87 arithmetic against Berkeley TestFloat..."
 	./run_x87_testfloat.sh "$(TESTFLOAT_GEN)" \
 		./obj_dir_x87_testfloat/Vtb_x87_testfloat \
 		"$(X87_TESTFLOAT_CASES)"
+
+test-x87-testfloat80: obj_dir_x87_testfloat80/Vtb_x87_testfloat80
+	@echo "Measuring x87 extF80 arithmetic and conversions against Berkeley TestFloat..."
+	./run_x87_testfloat80.sh "$(TESTFLOAT_BUILD)" \
+		./obj_dir_x87_testfloat80/Vtb_x87_testfloat80 \
+		x87_testfloat80_out $(X87_TESTFLOAT80_LEVEL)
 
 test-x87-fifo: obj_dir_x87_fifo/Vtb_x87_transfer_fifo
 	@echo "Running x87 transfer FIFO unit test..."
@@ -365,7 +390,7 @@ dhrystone:
 
 # Clean build artifacts
 clean:
-	rm -rf obj_dir_x87_testfloat
+	rm -rf obj_dir_x87_testfloat obj_dir_x87_testfloat80 x87_testfloat80_out
 	rm -rf obj_dir_x87_fifo
 	rm -rf obj_dir_x87_core
 	rm -rf obj_dir_x87
@@ -390,6 +415,7 @@ help:
 	@echo "  make test-x87-bridge - Run x87 protocol bridge unit test"
 	@echo "  make test-x87-core - Run x87 state and transfer unit test"
 	@echo "  make test-x87-testfloat - Check arithmetic with Berkeley TestFloat"
+	@echo "  make test-x87-testfloat80 - extF80 TestFloat map (x87_testfloat80_out/)"
 	@echo "  make test-x87-integration - Run x87-enabled CPU protocol test"
 	@echo "  make dhrystone      - Compare released z386 and current z486 on Dhrystone"
 	@echo "  make clean          - Remove build artifacts"
