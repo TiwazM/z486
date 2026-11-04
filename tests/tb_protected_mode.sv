@@ -1720,4 +1720,8 @@ module tb_protected_mode #(
         end
     end
 
+`ifdef X87_TIMING_MON
+`include "x87_timing_mon.svh"
+`endif
+
 endmodule

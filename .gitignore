@@ -17,3 +17,6 @@ __pycache__/
 # microcode/rom copied into tests/ by prepare.sh
 tests/ucode*.hex
 tests/pla_entry_rom.hex
+tests/obj_dir_timing/
+tests/x87_timing_out/
+tests/pla_*.hex
