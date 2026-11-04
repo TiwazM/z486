@@ -25,6 +25,12 @@ def x87(test, fop):
     return res[test]["x87_by_fop"][fop]["total"]
 
 
+def body(test, reps):
+    """Cycles of one repetition of the loop body (the loop's own cost removed)."""
+    r = res[test]
+    return (r["iter_mean"] - r["loop_overhead"]) / reps
+
+
 # (instruction, z486 cycles, Intel486 low, high, unsure?)
 ROWS = [
     ("FLD m32", line("FLD m32 / FSTP m32", "fld dword"), 3, 3, False),
@@ -86,6 +92,13 @@ ROWS = [
     ("FLDCW", homog("FLDCW"), 4, 4, False),
     ("FNSTCW", homog("FNSTCW"), 3, 3, False),
     ("FWAIT (x87 idle)", homog("FWAIT (x87 idle)"), 1, 3, True),
+    ("FADD ST,ST(i) + FWAIT (pair)", body("FADD + FWAIT", 4), 9, 23, True),
+    ("FMUL ST,ST(i) + FWAIT (pair)", body("FMUL + FWAIT", 4), 17, 19, True),
+    ("FDIV ST,ST(i) + FWAIT (pair)", body("FDIV + FWAIT", 4), 74, 76, True),
+    ("FWAIT FADD + FWAIT FSUB ST,ST(1)", body("FWAIT-prefixed FADD/FSUB ST,ST(1)", 2),
+     18, 46, True),
+    ("FWAIT FMUL + FWAIT FMUL ST,ST(i)", body("FWAIT-prefixed FMUL ST,ST(i)", 2), 34, 38, True),
+    ("FWAIT-prefixed FLD/FMUL/FADD/FSTP m64", body("FWAIT-prefixed expr m64", 2), 37, 57, True),
 ]
 
 

@@ -215,6 +215,21 @@ T("FADD/FSUB m64 alternating", st0, rep([f"fadd {m64('A64')}", f"fsub {m64('A64'
 T("FILD m16 / FSTP ST(0)", [], rep([f"fild {m16('I16')}"], 4) + rep(["fstp st(0)"], 4), n=32)
 T("FILD m32 / FSTP ST(0)", [], rep([f"fild {m32('I32')}"], 4) + rep(["fstp st(0)"], 4), n=32)
 T("FWAIT (x87 idle)", [], rep(["fwait"], 8), n=32)
+# FWAIT behind a running operation, and the 16-bit compilers' FWAIT before
+# every FPU instruction (compare the rows without it)
+T("FADD + FWAIT", st1_a, rep(["fadd st, st(1)", "fwait"], 4), n=32)
+T("FMUL + FWAIT", st12_a, rep(["fmul st, st(1)", "fwait", "fmul st, st(2)", "fwait"], 2), n=32)
+T("FDIV + FWAIT", st12_a, rep(["fdiv st, st(1)", "fwait", "fdiv st, st(2)", "fwait"], 2), n=16)
+T("FWAIT-prefixed FADD/FSUB ST,ST(1)", st1_a,
+  rep(["fwait", "fadd st, st(1)", "fwait", "fsub st, st(1)"], 2), n=32)
+T("FWAIT-prefixed FMUL ST,ST(i)", st12_a,
+  rep(["fwait", "fmul st, st(1)", "fwait", "fmul st, st(2)"], 2), n=32)
+T("FWAIT-prefixed expr m64", [],
+  rep(["fwait", f"fld {m64('A64')}", "fwait", f"fmul {m64('AINV64')}",
+       "fwait", f"fadd {m64('A64')}", "fwait", f"fstp {m64('S64')}"], 2), n=32)
+T("FWAIT-prefixed FCOMP m64 + FSTSW AX + SAHF", st0,
+  rep(["fwait", "fld st(0)", "fwait", f"fcomp {m64('A64')}", "fwait", "fnstsw ax", "sahf"], 2),
+  n=32)
 T("FCOMP m64 + FNSTSW AX + SAHF", st0, rep(["fld st(0)", f"fcomp {m64('A64')}", "fnstsw ax", "sahf"], 4), n=32,
   focus=[f"fcomp {m64('A64')}", "fnstsw ax"], helpers=["fld st(0)"])
 T("expr m64: FLD/FMUL/FADD/FSTP m64", [], rep([f"fld {m64('A64')}", f"fmul {m64('AINV64')}", f"fadd {m64('A64')}", f"fstp {m64('S64')}"], 2), n=32)
