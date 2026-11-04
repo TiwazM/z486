@@ -20,8 +20,6 @@ COND = {
     "FALSE": 0,
     "TRUE": 1,
     "SPECIAL": 2,
-    "INTEGRAL": 3,
-    "SUBUNIT": 4,
     "COUNT_MORE": 5,
     "TRANSFER_READY": 6,
     "ZERO": 7,
@@ -49,14 +47,13 @@ SRC = {
 
 STATE = {
     "HOLD": 0,
-    "RESTORE_COUNT": 1,
     "FORMAT_EXP_DEC": 2,
     "FORMAT_EXP_INC": 3,
 }
 
 PREPARE = {
     "HOLD": 0,
-    "LOAD_ROUNDINT": 1,
+    "ROUND_SPLIT": 1,
     "LOAD_FIST": 2,
     "FST": 3,
     "FLD": 4,
@@ -89,10 +86,7 @@ ENGINE = {
 
 PACK = {
     "HOLD": 0,
-    "PACK_INTERNAL": 1,
-    "COPY_A": 2,
-    "ROUNDINT_SPECIAL": 3,
-    "ROUNDINT_SUBUNIT": 4,
+    "PACK_ROUNDINT": 1,
     "PACK_FIST": 5,
     "FIST_INVALID": 6,
     "ROUND_PACK_FST": 7,
@@ -168,31 +162,19 @@ ProgramItem = tuple[str | None, UOp]
 
 
 PROGRAM: list[ProgramItem] = [
-    ("entry_frndint", UOp(classify="ROUNDINT")),
-    (None, UOp(flow="BRANCH", target="frnd_special", condition="SPECIAL")),
-    (None, UOp(flow="BRANCH", target="frnd_copy", condition="INTEGRAL")),
-    (None, UOp(flow="BRANCH", target="frnd_subunit", condition="SUBUNIT")),
-    (None, UOp(prepare="LOAD_ROUNDINT", destination="WORK", count="LOAD", grs="LOAD")),
-    ("frnd_shift", UOp(flow="LOOP", target="frnd_shift", condition="COUNT_MORE",
-                       src_a="WORK", destination="WORK",
-                       shift_route="RIGHT", count="DEC", grs="SHIFT")),
-    (None, UOp(src_a="WORK", alu_route="ROUND", destination="WORK")),
-    (None, UOp(state="RESTORE_COUNT", count="LOAD")),
-    ("frnd_restore", UOp(flow="LOOP", target="frnd_restore", condition="COUNT_MORE",
-                         src_a="WORK", destination="WORK",
-                         shift_route="LEFT", count="DEC")),
-    # A word that writes the result also finishes: FINISH latches the commit
-    # beside it, and done follows with the result in place.
-    (None, UOp(flow="FINISH", src_a="WORK", pack="PACK_INTERNAL",
-               destination="RESULT", commit="REPLACE_ST0")),
-    ("frnd_copy", UOp(flow="FINISH", src_a="OPERAND_A", pack="COPY_A",
-                      destination="RESULT", commit="REPLACE_ST0")),
-    ("frnd_special", UOp(flow="FINISH", src_a="OPERAND_A", pack="ROUNDINT_SPECIAL",
-                         destination="RESULT", side_effect="SET_STATUS",
-                         commit="REPLACE_ST0")),
-    ("frnd_subunit", UOp(flow="FINISH", src_a="OPERAND_A", pack="ROUNDINT_SUBUNIT",
-                         destination="RESULT", side_effect="SET_INEXACT",
-                         commit="REPLACE_ST0")),
+    # FRNDINT: the classification decides specials, integers and |x| < 1 at
+    # once (the result is ready); otherwise the exponent gives the integer
+    # point. A mask from it splits the significand into the integer part, the
+    # half bit and the sticky bits (ROUND_SPLIT), and the pack adds one unit
+    # at the integer point if RC says so. A word that writes the result also
+    # finishes: FINISH latches the commit beside it, and done follows with the
+    # result in place.
+    ("entry_frndint", UOp(src_a="OPERAND_A", classify="ROUNDINT")),
+    (None, UOp(flow="BRANCH", target="round_commit", condition="DIRECT_READY",
+               prepare="ROUND_SPLIT")),
+    (None, UOp(flow="FINISH", pack="PACK_ROUNDINT", destination="RESULT",
+               commit="REPLACE_ST0")),
+    ("round_commit", UOp(flow="FINISH", src_a="RESULT", commit="REPLACE_ST0")),
 
     ("entry_fld_m32", UOp(prepare="FLD", destination="WORK")),
     (None, UOp(flow="BRANCH", target="fld_commit", condition="DIRECT_READY")),

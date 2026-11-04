@@ -1,7 +1,8 @@
 //
 // x87 Executor
-// Add, multiply and divide/square root datapaths with shared rounding; transcendental
-// operands are classified here and computed by x87_control's programs
+// Add, multiply and divide/square root datapaths with shared rounding; FRNDINT
+// by masks; transcendental operands are classified here and computed by
+// x87_control's programs
 //
 module x87_executor
     import x87_pkg::*, x87_ucode_pkg::*;
@@ -53,14 +54,11 @@ logic [63:0] transfer_r;    // Provisional integer/IEEE store payload.
 logic [67:0] work_r;        // Shared significand, normalization, and rounding lane.
 logic [55:0] add_small_r;   // Exponent-aligned smaller add/sub operand with sticky bit.
 logic [5:0] count_r;        // Shared conversion/alignment/iteration counter.
-logic [5:0] restore_count_r;
 logic guard_r;
 logic round_r;
 logic sticky_r;
 logic input_sign_r;
 logic special_r;
-logic integral_r;
-logic subunit_r;
 logic zero_r;
 logic shift_left_r;
 logic invalid_r;
@@ -130,6 +128,25 @@ logic divsqrt_iterate;
 logic divsqrt_next_bit;
 logic [1:0] sqrt_next_pair;         // Radicand bits for the next remainder.
 logic divsqrt_remainder_nonzero;
+// FRNDINT rounds at the point the exponent gives, without a shift loop and
+// off the shared work register and adder. The classification takes the
+// specials, integers (2^53 and up) and |x| < 1 whole and otherwise loads the
+// significand and the number of fraction bits; ROUND_SPLIT masks off the
+// fraction bits (the integer part, and the same with the fraction bits set,
+// whose increment adds one unit at the integer point) and reduces them to
+// half and sticky bits; the pack picks the integer part or its increment.
+logic [5:0]  rs_amount_r;           // Fraction bits below the integer point (0-52).
+logic [52:0] rs_sig_r;              // Significand to split, then the integer part.
+logic [52:0] rs_up_r;               // Integer part with the fraction bits set.
+logic        rs_half_r;             // Discarded half bit.
+logic        rs_sticky_r;           // Any discarded bit below it.
+logic        rs_lsb_r;              // Integer part's last bit (nearest-even).
+logic [52:0] split_frac;            // ROUND_SPLIT: positions below the point,
+logic [52:0] split_below;           // below the half bit,
+logic [52:0] split_half;            // the half bit,
+logic [52:0] split_point;           // and the kept part's last bit.
+logic [53:0] rs_sum;                // Kept part plus one unit.
+logic        rs_increment;          // The rounding direction adds the unit.
 
 assign busy = seq_active;
 assign done = seq_done;
@@ -201,6 +218,25 @@ assign arithmetic_result = arithmetic_subtract
                          ? arithmetic_lhs - arithmetic_rhs
                          : arithmetic_lhs + arithmetic_rhs;
 assign rounded_work = arithmetic_result;
+
+// ROUND_SPLIT's masks: one LUT per bit from the registered amount.
+always_comb begin
+    for (int i = 0; i < 53; i++) begin
+        split_frac[i] = 6'(i) < rs_amount_r;
+        split_below[i] = 7'(i + 1) < {1'b0, rs_amount_r};
+        split_half[i] = 7'(i + 1) == {1'b0, rs_amount_r};
+        split_point[i] = 6'(i) == rs_amount_r;
+    end
+end
+assign rs_sum = {1'b0, rs_up_r} + 54'd1;
+always_comb begin
+    case (rounding_mode)
+        2'b00: rs_increment = rs_half_r && (rs_sticky_r || rs_lsb_r);
+        2'b01: rs_increment = operand.sign && (rs_half_r || rs_sticky_r);
+        2'b10: rs_increment = !operand.sign && (rs_half_r || rs_sticky_r);
+        default: rs_increment = 1'b0;
+    endcase
+end
 
 assign mul_sig_a = {operand.sig, operand.guard_bit, operand.round_bit, operand.sticky_bit};
 assign mul_sig_b = {operand_b.sig, operand_b.guard_bit, operand_b.round_bit, operand_b.sticky_bit};
@@ -275,8 +311,6 @@ always_comb begin
     conditions = '0;
     conditions[X87_COND_TRUE] = 1'b1;
     conditions[X87_COND_SPECIAL] = special_r;
-    conditions[X87_COND_INTEGRAL] = integral_r;
-    conditions[X87_COND_SUBUNIT] = subunit_r;
     // A divide whose first quotient bit is set has its 56 bits one step early.
     conditions[X87_COND_COUNT_MORE] =
         ((uop.engine == X87_ENGINE_DIV_ITERATE) && divsqrt_lead_r)
@@ -338,10 +372,9 @@ always_comb begin
             uop.pack = X87_PACK_HOLD;
     end
     if (X87_ABLATE_MASK[10]) begin  // FRNDINT.
-        if (uop_rom.prepare == X87_PREPARE_LOAD_ROUNDINT) uop.prepare = X87_PREPARE_HOLD;
+        if (uop_rom.prepare == X87_PREPARE_ROUND_SPLIT) uop.prepare = X87_PREPARE_HOLD;
         if (uop_rom.classify == X87_CLASSIFY_ROUNDINT) uop.classify = X87_CLASSIFY_HOLD;
-        if (((uop_rom.pack == X87_PACK_ROUNDINT_SPECIAL) || (uop_rom.pack == X87_PACK_ROUNDINT_SUBUNIT)))
-            uop.pack = X87_PACK_HOLD;
+        if (uop_rom.pack == X87_PACK_PACK_ROUNDINT) uop.pack = X87_PACK_HOLD;
     end
     if (X87_ABLATE_MASK[11]) begin  // Add/subtract.
         if (uop_rom.engine == X87_ENGINE_ADDSUB_ALIGN) uop.engine = X87_ENGINE_HOLD;
@@ -524,14 +557,11 @@ always_ff @(posedge clk) begin
         transfer_r <= 64'h0;
         work_r <= 68'h0;
         count_r <= 6'd0;
-        restore_count_r <= 6'd0;
         guard_r <= 1'b0;
         round_r <= 1'b0;
         sticky_r <= 1'b0;
         input_sign_r <= 1'b0;
         special_r <= 1'b0;
-        integral_r <= 1'b0;
-        subunit_r <= 1'b0;
         zero_r <= 1'b0;
         shift_left_r <= 1'b0;
         invalid_r <= 1'b0;
@@ -571,8 +601,6 @@ always_ff @(posedge clk) begin
             rounded_up <= 1'b0;
             round_r <= 1'b0;
             special_r <= 1'b0;
-            integral_r <= 1'b0;
-            subunit_r <= 1'b0;
             zero_r <= 1'b0;
             shift_left_r <= 1'b0;
             invalid_r <= 1'b0;
@@ -625,13 +653,44 @@ always_ff @(posedge clk) begin
 
             case (uop.classify)
                 X87_CLASSIFY_ROUNDINT: begin
+                    // Specials, integers (no fraction bit in the significand
+                    // or its guard, round and sticky bits) and |x| < 1 are
+                    // ready here; ROUND_SPLIT and PACK_ROUNDINT round the rest.
                     logic signed [16:0] unbiased;
+                    logic above_half;
+                    logic increment_to_one;
                     unbiased = $signed({2'b00, operand.exp}) - 17'sd16383;
-                    unbiased_r <= unbiased;
-                    special_r <= (operand.class_id != X87_NORMAL) &&
-                                 (operand.class_id != X87_DENORMAL);
-                    integral_r <= unbiased >= 17'sd52;
-                    subunit_r <= unbiased < 0;
+                    above_half = |operand.sig[51:0] || operand.guard_bit ||
+                                 operand.round_bit || operand.sticky_bit;
+                    increment_to_one = directed_increment(
+                        operand.sign, rounding_mode, 1'b1);
+                    if (rounding_mode == 2'b00)
+                        increment_to_one = (unbiased == -17'sd1) && above_half;
+                    direct_ready_r <= 1'b1;
+                    if ((operand.class_id != X87_NORMAL) &&
+                        (operand.class_id != X87_DENORMAL)) begin
+                        if (operand.class_id == X87_NAN) begin
+                            result_r <= quiet_nan(operand);
+                            invalid <= is_signaling_nan(operand);
+                        end else if ((operand.class_id == X87_INFINITY) ||
+                                     (operand.class_id == X87_ZERO)) begin
+                            result_r <= operand;
+                        end else begin
+                            result_r <= x87_indefinite();
+                            invalid <= 1'b1;
+                        end
+                    end else if (unbiased >= 17'sd53) begin
+                        result_r <= operand;
+                    end else if (unbiased < 0) begin
+                        result_r <= increment_to_one ? x87_one()
+                                                     : x87_zero(operand.sign);
+                        if (increment_to_one)
+                            result_r.sign <= operand.sign;
+                        inexact <= 1'b1;
+                        rounded_up <= increment_to_one;
+                    end else begin
+                        direct_ready_r <= 1'b0;
+                    end
                 end
 
                 X87_CLASSIFY_FIST: begin
@@ -1093,52 +1152,21 @@ always_ff @(posedge clk) begin
             endcase
 
             case (uop.pack)
-                X87_PACK_PACK_INTERNAL: begin
+                // The kept part or its increment; a carry out of the
+                // significand (from all ones) is the next power of two.
+                X87_PACK_PACK_ROUNDINT: begin
                     result_r <= '0;
                     result_r.sign <= operand.sign;
-                    // WORK may contain a carry after the restore shift.
-                    if (work_r[53]) begin
+                    if (rs_increment && rs_sum[53]) begin
                         result_r.exp <= operand.exp + 15'd1;
                         result_r.sig <= {1'b1, 52'h0};
                     end else begin
                         result_r.exp <= operand.exp;
-                        result_r.sig <= work_r[52:0];
+                        result_r.sig <= rs_increment ? rs_sum[52:0] : rs_sig_r;
                     end
                     result_r.class_id <= X87_NORMAL;
-                end
-
-                X87_PACK_COPY_A:
-                    result_r <= operand;
-
-                X87_PACK_ROUNDINT_SPECIAL: begin
-                    if (operand.class_id == X87_NAN) begin
-                        result_r <= quiet_nan(operand);
-                        invalid <= is_signaling_nan(operand);
-                    end else if ((operand.class_id == X87_INFINITY) ||
-                                 (operand.class_id == X87_ZERO)) begin
-                        result_r <= operand;
-                    end else begin
-                        result_r <= x87_indefinite();
-                        invalid <= 1'b1;
-                    end
-                end
-
-                X87_PACK_ROUNDINT_SUBUNIT: begin
-                    logic above_half;
-                    logic increment_to_one;
-                    above_half = |operand.sig[51:0] || operand.guard_bit ||
-                                 operand.round_bit || operand.sticky_bit;
-                    increment_to_one = directed_increment(
-                        operand.sign, rounding_mode, 1'b1);
-                    if (rounding_mode == 2'b00)
-                        increment_to_one =
-                            (unbiased_r == -17'sd1) && above_half;
-                    result_r <= increment_to_one ? x87_one()
-                                                 : x87_zero(operand.sign);
-                    if (increment_to_one)
-                        result_r.sign <= operand.sign;
-                    inexact <= 1'b1;
-                    rounded_up <= increment_to_one;
+                    inexact <= rs_half_r || rs_sticky_r;
+                    rounded_up <= rs_increment;
                 end
 
                 X87_PACK_PACK_FIST: begin
@@ -1360,15 +1388,6 @@ always_ff @(posedge clk) begin
             endcase
 
             case (uop.prepare)
-                X87_PREPARE_LOAD_ROUNDINT: begin
-                    count_r <= 6'(17'sd52 - unbiased_r);
-                    restore_count_r <= 6'(17'sd52 - unbiased_r);
-                    work_r <= {15'h0, operand.sig};
-                    guard_r <= 1'b0;
-                    sticky_r <= operand.guard_bit || operand.round_bit ||
-                                operand.sticky_bit;
-                end
-
                 X87_PREPARE_LOAD_FIST: begin
                     logic signed [16:0] shift_count;
                     work_r <= {15'h0, operand.sig};
@@ -1533,9 +1552,6 @@ always_ff @(posedge clk) begin
             endcase
 
             case (uop.state)
-                X87_STATE_RESTORE_COUNT:
-                    count_r <= restore_count_r;
-
                 X87_STATE_FORMAT_EXP_DEC: begin
                     format_exp_r <= format_exp_r -
                                     (fild_shift_four ? 17'sd4 : 17'sd1);
@@ -1587,6 +1603,42 @@ always_ff @(posedge clk) begin
 
                 default: begin end
             endcase
+        end
+    end
+end
+
+// FRNDINT's rounding bank (see the declarations). Every path is register to
+// register: ROUND_SPLIT's one-LUT masks with their OR trees; the increment
+// is in the pack.
+always_ff @(posedge clk) begin
+    if (reset) begin
+        rs_amount_r <= 6'd0;
+        rs_sig_r <= 53'h0;
+        rs_up_r <= 53'h0;
+        rs_half_r <= 1'b0;
+        rs_sticky_r <= 1'b0;
+        rs_lsb_r <= 1'b0;
+    end else if (seq_exec_valid) begin
+        if (uop.classify == X87_CLASSIFY_ROUNDINT) begin
+            // Fraction bits: 52 - (exp - 16383), for 2^0 <= |x| < 2^53.
+            rs_amount_r <= 6'(15'd16435 - operand.exp);
+            rs_sig_r <= operand.sig;
+        end
+
+        if (uop.prepare == X87_PREPARE_ROUND_SPLIT) begin
+            // No fraction bit in the significand (2^52 <= |x| < 2^53) leaves
+            // the guard bit as the half bit.
+            if (rs_amount_r == 6'd0) begin
+                rs_half_r <= operand.guard_bit;
+                rs_sticky_r <= operand.round_bit || operand.sticky_bit;
+            end else begin
+                rs_half_r <= |(rs_sig_r & split_half);
+                rs_sticky_r <= |(rs_sig_r & split_below) || operand.guard_bit ||
+                               operand.round_bit || operand.sticky_bit;
+            end
+            rs_lsb_r <= |(rs_sig_r & split_point);
+            rs_sig_r <= rs_sig_r & ~split_frac;
+            rs_up_r <= rs_sig_r | split_frac;
         end
     end
 end
