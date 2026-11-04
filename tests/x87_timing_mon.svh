@@ -91,7 +91,7 @@ if (ENABLE_X87) begin : gen_x87_timing_mon
         (dut.x87.gen_x87.control.poly_phase != 0),   // 9
         (dut.x87.gen_x87.control.fprem_phase != 0),  // 8
         (dut.x87.gen_x87.control.fscale_phase != 0), // 7
-        (dut.x87.gen_x87.control.logexp_phase != 0), // 6
+        1'b0,                                        // 6 (was the log/exp tables)
         dut.x87.gen_x87.control.fptan_trans_pending ||
         dut.x87.gen_x87.control.fptan_div_pending ||
         dut.x87.gen_x87.control.fptan_push_after_result, // 5

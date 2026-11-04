@@ -51,6 +51,7 @@ x87_executor dut (
     .quiet_compare(quiet_compare),
     .trans_cosine(1'b0),
     .trans_atan2(1'b0),
+    .trans_logexp(2'b00),
     .operand(operand),
     .operand_b(operand_b),
     .transfer_in(transfer_in),

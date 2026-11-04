@@ -25,6 +25,13 @@ typedef struct packed {
     x87_class_t   class_id;   // Registered special-value classification.
 } x87_reg_t;
 
+// x87_executor's trans_logexp: the TRANS classification for F2XM1, FYL2X or
+// FYL2XP1 (bit 1: two operands, y in operand, x in operand_b).
+localparam logic [1:0] X87_TRANS_NONE    = 2'd0;   // FSIN/FCOS/FPTAN/FPATAN
+localparam logic [1:0] X87_TRANS_F2XM1   = 2'd1;
+localparam logic [1:0] X87_TRANS_FYL2X   = 2'd2;
+localparam logic [1:0] X87_TRANS_FYL2XP1 = 2'd3;
+
 function automatic x87_reg_t x87_empty();
     x87_reg_t value;
     value = '0;

@@ -355,7 +355,7 @@ U_DACT, U_DISS, U_DVALID, U_DREADY, U_DREG, U_DCMDP, U_DST, U_POSTED = 15, 14, 1
 K_CMDV, K_CMDR, K_CORE_R, K_BUSYN, K_PEREQ, K_CMDPEND, K_DPEND = 31, 30, 29, 28, 27, 26, 25
 K_EXPEND, K_EXBUSY, K_EXDONE, K_PUSH, K_RESW, K_MMATH, K_STORE, K_POP, K_STW = 24, 23, 22, 21, 20, 19, 18, 17, 16
 K_WIN, K_RDREQ, K_RDRESP, K_STATRD, K_CCPULSE, K_PRHOLD = 15, 14, 13, 12, 11, 10
-K_POLY, K_FPREM, K_FSCALE, K_LOGEXP, K_FPTAN, K_BCD = 9, 8, 7, 6, 5, 4
+K_POLY, K_FPREM, K_FSCALE, K_FPTAN, K_BCD = 9, 8, 7, 5, 4
 
 
 def bit(v, b):
@@ -396,7 +396,7 @@ def x87_phase(cpu, unit, ctl, kinds):
     if bit(ctl, K_EXBUSY):
         return "exec"
     if bit(ctl, K_POLY) or bit(ctl, K_FPREM) or bit(ctl, K_FSCALE) or \
-       bit(ctl, K_LOGEXP) or bit(ctl, K_FPTAN) or bit(ctl, K_BCD):
+       bit(ctl, K_FPTAN) or bit(ctl, K_BCD):
         return "ctl_seq"          # control-level program between executor ops
     if bit(ctl, K_EXPEND):
         return "exec_launch"

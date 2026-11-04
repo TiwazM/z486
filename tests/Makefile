@@ -18,10 +18,8 @@ X87_UCODE_GEN := $(X87_DIR)/x87_ucode.svh \
 			$(X87_DIR)/x87_entries.svh
 X87_COMMAND_GEN := $(X87_DIR)/x87_command_decode.svh \
 			$(X87_DIR)/x87_command_decode.mif
-X87_LOGEXP_GEN := $(X87_DIR)/x87_logexp_tables.svh \
-			$(X87_DIR)/x87_logexp_tables.mif
 X87_POLY_GEN := $(X87_DIR)/x87_poly_rom.svh
-X87_GEN := $(X87_UCODE_GEN) $(X87_COMMAND_GEN) $(X87_LOGEXP_GEN) $(X87_POLY_GEN)
+X87_GEN := $(X87_UCODE_GEN) $(X87_COMMAND_GEN) $(X87_POLY_GEN)
 X87_RTL := $(X87_DIR)/x87_pkg.sv \
 			$(X87_DIR)/x87_ucode_pkg.sv \
 			$(X87_DIR)/x87_bridge.sv \
@@ -46,8 +44,7 @@ RTL_SRCS := $(Z486_DIR)/z486_pkg.sv $(X87_DIR)/x87_pkg.sv \
 			$(Z486_DIR)/memory.sv $(Z486_DIR)/bus_unit.sv $(Z486_DIR)/cache_unit.sv $(Z486_DIR)/l1_cache.sv $(Z486_DIR)/l1_icache.sv \
 			$(filter-out $(X87_DIR)/x87_pkg.sv $(X87_DIR)/x87_ucode_pkg.sv,$(X87_RTL)) \
 			$(Z486_DIR)/dsp_mul.sv $(Z486_DIR)/protection.sv $(Z486_DIR)/segmentation_unit.sv
-RTL_DEPS := $(Z486_DIR)/ucode_recipes.svh $(Z486_DIR)/pb_b1_class.svh $(X87_GEN) \
-			$(X87_DIR)/x87_logexp_rom.sv
+RTL_DEPS := $(Z486_DIR)/ucode_recipes.svh $(Z486_DIR)/pb_b1_class.svh $(X87_GEN)
 # Optional modules (not yet integrated):
 # RTL_SRCS += $(Z486_DIR)/muldiv.sv $(Z486_DIR)/bus_prefetch.sv
 TB_SRCS := tb_z486.sv
@@ -200,9 +197,6 @@ $(X87_UCODE_GEN): $(X87_DIR)/build_x87_microcode.py
 $(X87_COMMAND_GEN): $(X87_DIR)/build_x87_command_decode.py
 	cd $(X87_DIR) && ./build_x87_command_decode.py
 
-$(X87_LOGEXP_GEN): $(X87_DIR)/build_x87_logexp_tables.py
-	cd $(X87_DIR) && ./build_x87_logexp_tables.py
-
 obj_dir/Vtb_x87_sequencer: $(X87_DIR)/x87_ucode.svh $(X87_DIR)/x87_entries.svh \
 		$(X87_DIR)/x87_ucode_pkg.sv $(X87_DIR)/x87_ucode_rom.sv \
 		$(X87_DIR)/x87_sequencer.sv $(TB_X87_SEQ_SRCS) $(CPP_X87_SEQ_SRCS)
@@ -268,7 +262,7 @@ obj_dir_x87_core/Vtb_x87_core: $(X87_DIR)/x87_ucode.svh \
 		$(X87_DIR)/x87_transfer_fifo.sv \
 		$(X87_DIR)/x87_stack_mem.sv \
 		$(X87_DIR)/x87_command_rom.sv \
-		$(X87_DIR)/x87_logexp_rom.sv \
+		$(X87_POLY_GEN) \
 		$(X87_DIR)/x87_control.sv $(TB_X87_CORE_SRCS) \
 		$(CPP_X87_CORE_SRCS)
 	@echo "Building x87 core unit test with Verilator..."

@@ -2,8 +2,6 @@
 // x87 Control
 // Command decode, microsequencing, status, CPU transfers and the register stack
 //
-`include "x87_logexp_rom.sv"
-
 module x87_control
     import x87_pkg::*, x87_ucode_pkg::*;
 (
@@ -229,15 +227,17 @@ x87_reg_t     arith_operand_a;
 x87_reg_t     arith_operand_b;
 logic         trans_cosine;
 logic         trans_atan2;
+logic   [1:0] trans_logexp;              // X87_TRANS_F2XM1/FYL2X/FYL2XP1, else 0.
 logic         fptan_trans_pending;       // CORDIC tangent pair has not returned.
 logic         fptan_div_pending;         // Shared divide is producing tan = sin/cos.
 logic         fptan_push_after_result;   // Tangent write precedes architectural push 1.0.
 logic         fptan_sincos;              // FSINCOS: push cos(x) instead of 1.0, no divide.
 
-// Transcendental programs (build_x87_poly.py): FSIN/FCOS/FSINCOS/FPTAN/FPATAN
-// of finite, non-special operands run as sequences of the executor's own
-// operations; the executor's TRANS operation only classifies (special results
-// commit directly, the rest finish with no commit and start a program).
+// Transcendental programs (build_x87_poly.py): FSIN/FCOS/FSINCOS/FPTAN/FPATAN,
+// F2XM1, FYL2X and FYL2XP1 of finite, non-special operands run as sequences
+// of the executor's own operations; the executor's TRANS operation only
+// classifies (special results commit directly, the rest finish with no commit
+// and start a program).
 `include "x87_poly_rom.svh"
 typedef enum logic [3:0] {
     POLY_IDLE,
@@ -317,8 +317,6 @@ x87_reg_t     fprem_dividend;
 x87_reg_t     fprem_divisor;
 logic [2:0]   fprem_quotient_bits;
 logic         fprem_nearest;             // FPREM1: round the quotient to nearest.
-logic         fyl2xp1_add_pending;       // FYL2XP1: ST0 + 1.0 precedes the FYL2X path.
-x87_reg_t     fyl2xp1_y;                 // FYL2XP1's ST(1), held across the add.
 logic         fxtract_exp_pending;       // FXTRACT: the FILD of the exponent writes here.
 logic [2:0]   fxtract_exp_index;
 typedef enum logic [1:0] {
@@ -332,38 +330,6 @@ logic   [52:0] fscale_shift;
 logic    [5:0] fscale_shift_count;
 logic          fscale_sign;
 logic signed [31:0] fscale_delta;
-typedef enum logic [3:0] {
-    LOGEXP_IDLE,
-    LOGEXP_ARGUMENT_SHIFT,
-    LOGEXP_LOOKUP,
-    LOGEXP_PREPARE,
-    LOGEXP_INTERPOLATE,
-    LOGEXP_OFFSET,
-    LOGEXP_NORMALIZE,
-    LOGEXP_NORMALIZE_STEP,
-    LOGEXP_COMMIT
-} logexp_phase_t;
-logexp_phase_t logexp_phase;
-logic          logexp_fyl2x;
-x87_reg_t      logexp_input;
-x87_reg_t      logexp_multiplier;
-logic   [52:0] logexp_argument_shift;
-logic    [5:0] logexp_argument_shift_count;
-logic    [9:0] logexp_address;
-logic   [99:0] logexp_data;
-logic signed [54:0] logexp_base_q52;
-logic signed [45:0] logexp_delta_q52;
-logic          [7:0] logexp_fraction;
-logic signed [69:0] logexp_offset_q52;
-logic signed [54:0] logexp_interpolated_q52;
-logic signed [69:0] logexp_fixed_q52;
-logic         [69:0] logexp_normal_magnitude;
-logic signed  [16:0] logexp_normal_exp;
-logic                logexp_normal_sign;
-logic                logexp_normal_guard;
-logic                logexp_normal_round;
-logic                logexp_normal_sticky;
-x87_reg_t             logexp_result;
 logic   [7:0] v2_exec_uaddr;
 
 wire [15:0] status_word = {status_flags[15:14], top, status_flags[10:0]};
@@ -400,7 +366,7 @@ wire trans_denormal_operand = v2_exec_denormal_operand ||
 x87_reg_t trans_aux;
 assign trans_aux = poly_final_done ? poly_aux : x87_one();
 wire math_done = v2_exec_math_done && (fprem_phase == FPREM_IDLE) &&
-                 !(trans_done && fptan_trans_pending) && !fyl2xp1_add_pending &&
+                 !(trans_done && fptan_trans_pending) &&
                  !trans_compute && !poly_internal;
 wire math_invalid = v2_exec_invalid;
 wire math_inexact = trans_inexact;
@@ -491,18 +457,6 @@ function automatic logic [10:0] fop_decode_key(input logic [10:0] fop);
     if (fop[7:6] == 2'b11)
         return fop;
     return {fop[10:8], 2'b00, fop[5:3], 3'b000};
-endfunction
-
-function automatic logic signed [69:0] x87_log2_integer_q52(
-    input x87_reg_t value
-);
-    logic signed [16:0] unbiased;
-    logic signed [69:0] extended;
-    begin
-        unbiased = $signed({2'b00, value.exp}) - 17'sd16383;
-        extended = {{53{unbiased[16]}}, unbiased};
-        return extended <<< 52;
-    end
 endfunction
 
 function automatic logic [2:0] x87_integer_low3(input x87_reg_t value);
@@ -919,7 +873,7 @@ wire core_cmd_idle = ((rx_kind == RX_NONE) || restartable_rx_command) &&
                    !fptan_trans_pending && !fptan_div_pending &&
                    !fptan_push_after_result &&
                    (fscale_phase == FSCALE_IDLE) &&
-                   (logexp_phase == LOGEXP_IDLE) && !poly_active &&
+                   !poly_active &&
                    !read_resp_valid;
 // Taken behind a running plain operation: register forms but the status
 // reads (DF E0-FF), which need the finished status, and direct memory loads
@@ -1067,7 +1021,6 @@ assign pereq = (rx_kind != RX_NONE) || poly_active ||
                fptan_trans_pending || fptan_div_pending ||
                fptan_push_after_result ||
                (fscale_phase != FSCALE_IDLE) ||
-               (logexp_phase != LOGEXP_IDLE) ||
                status_read_pending || command_complete_pulse ||
                (pereq_release_hold != 2'b00);
 assign error_n = !status_flags[7];
@@ -1229,12 +1182,6 @@ x87_stack_mem stack_mem (
     .read_data_b(stack_ram_q_b)
 );
 
-x87_logexp_rom logexp_rom (
-    .clk(clk),
-    .address(logexp_address),
-    .q(logexp_data)
-);
-
 // XTR's two results: m (with A's guard, round and sticky) and 2^27 + 2^15 + k.
 x87_reg_t xtr_m, xtr_t;
 always_comb begin
@@ -1388,6 +1335,7 @@ x87_executor executor (
     .quiet_compare(arith_quiet_compare),
     .trans_cosine(trans_cosine),
     .trans_atan2(trans_atan2),
+    .trans_logexp(trans_logexp),
     .operand(arith_operand_a),
     .operand_b(arith_operand_b),
     .transfer_in(v2_exec_transfer),
@@ -1503,6 +1451,7 @@ always_ff @(posedge clk) begin
         arith_operand_b <= x87_empty();
         trans_cosine <= 1'b0;
         trans_atan2 <= 1'b0;
+        trans_logexp <= X87_TRANS_NONE;
         fptan_trans_pending <= 1'b0;
         fptan_div_pending <= 1'b0;
         fptan_push_after_result <= 1'b0;
@@ -1537,8 +1486,6 @@ always_ff @(posedge clk) begin
         poly_opa <= x87_empty();
         fprem_phase <= FPREM_IDLE;
         fprem_nearest <= 1'b0;
-        fyl2xp1_add_pending <= 1'b0;
-        fyl2xp1_y <= x87_empty();
         fxtract_exp_pending <= 1'b0;
         fxtract_exp_index <= 3'd0;
         fprem_dividend <= x87_empty();
@@ -1550,26 +1497,6 @@ always_ff @(posedge clk) begin
         fscale_shift_count <= '0;
         fscale_sign <= 1'b0;
         fscale_delta <= '0;
-        logexp_phase <= LOGEXP_IDLE;
-        logexp_fyl2x <= 1'b0;
-        logexp_input <= x87_empty();
-        logexp_multiplier <= x87_empty();
-        logexp_argument_shift <= '0;
-        logexp_argument_shift_count <= '0;
-        logexp_address <= 10'd0;
-        logexp_base_q52 <= '0;
-        logexp_delta_q52 <= '0;
-        logexp_fraction <= '0;
-        logexp_offset_q52 <= '0;
-        logexp_interpolated_q52 <= '0;
-        logexp_fixed_q52 <= '0;
-        logexp_normal_magnitude <= '0;
-        logexp_normal_exp <= '0;
-        logexp_normal_sign <= 1'b0;
-        logexp_normal_guard <= 1'b0;
-        logexp_normal_round <= 1'b0;
-        logexp_normal_sticky <= 1'b0;
-        logexp_result <= x87_empty();
         read_resp_valid <= 1'b0;
         read_resp_data <= 32'h0;
         clear_stack();
@@ -1888,101 +1815,6 @@ always_ff @(posedge clk) begin
             fscale_phase <= FSCALE_IDLE;
         end
 
-        // Keep ROM lookup, interpolation, offset, and normalization registered.
-        // Normalize one bit per cycle to avoid a wide priority encoder and
-        // variable shifter in these low-rate transcendental operations.
-        if (logexp_phase == LOGEXP_ARGUMENT_SHIFT) begin
-            logexp_argument_shift <= logexp_argument_shift >> 1;
-            logexp_argument_shift_count <= logexp_argument_shift_count - 6'd1;
-            if (logexp_argument_shift_count == 6'd1) begin
-                logexp_address <= logexp_input.sign
-                                ? {2'b10, logexp_argument_shift[52:45]}
-                                : {2'b01, logexp_argument_shift[52:45]};
-                logexp_fraction <= logexp_argument_shift[44:37];
-                logexp_phase <= LOGEXP_LOOKUP;
-            end
-        end else if (logexp_phase == LOGEXP_LOOKUP) begin
-            logexp_phase <= LOGEXP_PREPARE;
-        end else if (logexp_phase == LOGEXP_PREPARE) begin
-            logexp_base_q52 <= $signed({1'b0, logexp_data[99:46]});
-            logexp_delta_q52 <= $signed(logexp_data[45:0]);
-            if (logexp_fyl2x) begin
-                logexp_fraction <= logexp_input.sig[43:36];
-                logexp_offset_q52 <= x87_log2_integer_q52(logexp_input);
-            end else begin
-                logexp_offset_q52 <= -70'sd4503599627370496;
-            end
-            logexp_phase <= LOGEXP_INTERPOLATE;
-        end else if (logexp_phase == LOGEXP_INTERPOLATE) begin
-            logexp_interpolated_q52 <= logexp_base_q52 + 55'(
-                (logexp_delta_q52 * $signed({1'b0, logexp_fraction})) >>> 8);
-            logexp_phase <= LOGEXP_OFFSET;
-        end else if (logexp_phase == LOGEXP_OFFSET) begin
-            logexp_fixed_q52 <= logexp_offset_q52 +
-                {{15{logexp_interpolated_q52[54]}},
-                 logexp_interpolated_q52};
-            logexp_phase <= LOGEXP_NORMALIZE;
-        end else if (logexp_phase == LOGEXP_NORMALIZE) begin
-            if (logexp_fixed_q52 == 0) begin
-                logexp_result <= x87_zero(1'b0);
-                logexp_phase <= LOGEXP_COMMIT;
-            end else begin
-                logexp_normal_magnitude <= logexp_fixed_q52[69]
-                                         ? -logexp_fixed_q52
-                                         : logexp_fixed_q52;
-                logexp_normal_exp <= 17'sd16383;
-                logexp_normal_sign <= logexp_fixed_q52[69];
-                logexp_normal_guard <= 1'b0;
-                logexp_normal_round <= 1'b0;
-                logexp_normal_sticky <= 1'b0;
-                logexp_phase <= LOGEXP_NORMALIZE_STEP;
-            end
-        end else if (logexp_phase == LOGEXP_NORMALIZE_STEP) begin
-            if (|logexp_normal_magnitude[69:53]) begin
-                logexp_normal_magnitude <= logexp_normal_magnitude >> 1;
-                logexp_normal_exp <= logexp_normal_exp + 17'sd1;
-                logexp_normal_guard <= logexp_normal_magnitude[0];
-                logexp_normal_round <= logexp_normal_guard;
-                logexp_normal_sticky <= logexp_normal_sticky |
-                                        logexp_normal_round;
-            end else if (!logexp_normal_magnitude[52]) begin
-                logexp_normal_magnitude <= logexp_normal_magnitude << 1;
-                logexp_normal_exp <= logexp_normal_exp - 17'sd1;
-            end else begin
-                logexp_result.sign <= logexp_normal_sign;
-                logexp_result.exp <= logexp_normal_exp[14:0];
-                logexp_result.sig <= logexp_normal_magnitude[52:0];
-                logexp_result.class_id <= X87_NORMAL;
-                logexp_result.guard_bit <= logexp_normal_guard;
-                logexp_result.round_bit <= logexp_normal_round;
-                logexp_result.sticky_bit <= logexp_normal_sticky;
-                logexp_phase <= LOGEXP_COMMIT;
-            end
-        end else if (logexp_phase == LOGEXP_COMMIT) begin
-            logexp_phase <= LOGEXP_IDLE;
-            if (logexp_fyl2x) begin
-                arith_compare <= 1'b0;
-                arith_write_result <= 1'b1;
-                arith_pop_count <= 2'd1;
-                arith_dest_index <= top + 3'd1;
-                arith_operand_a <= logexp_multiplier;
-                arith_operand_b <= logexp_result;
-                v2_exec_op <= X87_ARITH_MUL;
-                v2_exec_owner <= EXEC_MATH;
-                v2_exec_size <= 2'd0;
-                v2_exec_transfer <= 64'h0;
-                v2_exec_pending <= 1'b1;
-            end else begin
-                result_write_index <= st0_index;
-                result_write_raw <= x87_to_m80(logexp_result);
-                result_write_pending <= 1'b1;
-                if ((logexp_input.class_id != X87_ZERO) &&
-                    !((logexp_input.exp == 15'h3fff) &&
-                      (logexp_input.sig == {1'b1, 52'h0})))
-                    status_flags[5] <= 1'b1;
-            end
-        end
-
         // FPREM reuses the existing divide, round-to-integer, multiply, and
         // subtract microprograms. The quotient is rounded toward zero, and
         // its low three bits become C0/C3/C1 after the remainder commits.
@@ -2034,33 +1866,25 @@ always_ff @(posedge clk) begin
             endcase
         end
 
-        // FYL2XP1: the sum ST0 + 1.0 enters the FYL2X log/multiply path.
-        if (v2_exec_math_done && fyl2xp1_add_pending) begin
-            fyl2xp1_add_pending <= 1'b0;
-            if (v2_exec_result.sign ||
-                (v2_exec_result.class_id == X87_ZERO)) begin
-                raise_invalid();
-                if (control_word[0]) begin
-                    write_stack(top + 3'd1, x87_indefinite());
-                    pop_value();
-                end
-                command_complete_pulse <= 1'b1;
-            end else begin
-                logexp_fyl2x <= 1'b1;
-                logexp_input <= v2_exec_result;
-                logexp_multiplier <= fyl2xp1_y;
-                logexp_address <= {2'b00, v2_exec_result.sig[51:44]};
-                logexp_phase <= LOGEXP_LOOKUP;
-            end
-        end
-
         // Transcendental program: each word reads A and B, runs one executor
         // operation (round to nearest, 53 bits) and writes the scratch; the
         // final word rounds per the control word and retires as the TRANS
-        // result (trans_done), with cos(x) in poly_aux.
+        // result (trans_done), with cos(x) in poly_aux. F2XM1 and FYL2XP1
+        // of |x| < 2^-60 run their short forms.
         if (trans_compute) begin
             poly_phase <= POLY_LOAD_B;
-            poly_pc <= trans_atan2 ? X87_POLY_ENTRY_ATAN : X87_POLY_ENTRY_SINCOS;
+            case (trans_logexp)
+                X87_TRANS_F2XM1:
+                    poly_pc <= (arith_operand_a.exp < 15'h3fc3)
+                             ? X87_POLY_ENTRY_EXP_TINY : X87_POLY_ENTRY_EXP;
+                X87_TRANS_FYL2X:
+                    poly_pc <= X87_POLY_ENTRY_LOG;
+                X87_TRANS_FYL2XP1:
+                    poly_pc <= (arith_operand_b.exp < 15'h3fc3)
+                             ? X87_POLY_ENTRY_LOG1P_TINY : X87_POLY_ENTRY_LOG1P;
+                default:
+                    poly_pc <= trans_atan2 ? X87_POLY_ENTRY_ATAN : X87_POLY_ENTRY_SINCOS;
+            endcase
             poly_k0 <= 1'b1;
             poly_exact <= 1'b0;
             poly_quadrant <= 2'd0;
@@ -2534,6 +2358,7 @@ always_ff @(posedge clk) begin
                         arith_operand_b <= x87_empty();
                         trans_cosine <= 1'b0;
                         trans_atan2 <= 1'b0;
+                        trans_logexp <= X87_TRANS_NONE;
                         v2_exec_op <= X87_ARITH_TRANS;
                         v2_exec_owner <= EXEC_MATH;
                         v2_exec_size <= 2'd0;
@@ -2564,6 +2389,7 @@ always_ff @(posedge clk) begin
                         arith_operand_b <= stack_read_data_a; // X = ST(0)
                         trans_cosine <= 1'b0;
                         trans_atan2 <= 1'b1;
+                        trans_logexp <= X87_TRANS_NONE;
                         v2_exec_op <= X87_ARITH_TRANS;
                         v2_exec_owner <= EXEC_MATH;
                         v2_exec_size <= 2'd0;
@@ -2579,36 +2405,23 @@ always_ff @(posedge clk) begin
                             write_stack(top + 3'd1, x87_indefinite());
                             pop_value();
                         end
-                    end else if (command_decode.argument[0]) begin
-                        // FYL2XP1: ST0 + 1.0 first, then the FYL2X path.
+                    end else begin
                         command_complete_pulse <= 1'b0;
                         arith_compare <= 1'b0;
-                        arith_write_result <= 1'b0;
-                        arith_pop_count <= 2'd0;
-                        arith_operand_a <= stack_read_data_a;
-                        arith_operand_b <= x87_one();
-                        v2_exec_op <= X87_ARITH_ADD;
+                        arith_write_result <= 1'b1;
+                        arith_pop_count <= 2'd1;
+                        arith_dest_index <= top + 3'd1;
+                        arith_operand_a <= stack_read_data_b; // y = ST(1)
+                        arith_operand_b <= stack_read_data_a; // x = ST(0)
+                        trans_cosine <= 1'b0;
+                        trans_atan2 <= 1'b0;
+                        trans_logexp <= command_decode.argument[0]
+                                      ? X87_TRANS_FYL2XP1 : X87_TRANS_FYL2X;
+                        v2_exec_op <= X87_ARITH_TRANS;
                         v2_exec_owner <= EXEC_MATH;
                         v2_exec_size <= 2'd0;
                         v2_exec_transfer <= 64'h0;
                         v2_exec_pending <= 1'b1;
-                        fyl2xp1_y <= stack_read_data_b;
-                        fyl2xp1_add_pending <= 1'b1;
-                    end else if (stack_read_data_a.sign ||
-                                 (stack_read_data_a.class_id == X87_ZERO)) begin
-                        raise_invalid();
-                        if (control_word[0]) begin
-                            write_stack(top + 3'd1, x87_indefinite());
-                            pop_value();
-                        end
-                    end else begin
-                        command_complete_pulse <= 1'b0;
-                        logexp_fyl2x <= 1'b1;
-                        logexp_input <= stack_read_data_a;
-                        logexp_multiplier <= stack_read_data_b;
-                        logexp_address <= {2'b00,
-                                           stack_read_data_a.sig[51:44]};
-                        logexp_phase <= LOGEXP_LOOKUP;
                     end
                 end
                 X87_CMD_F2XM1: begin
@@ -2616,32 +2429,22 @@ always_ff @(posedge clk) begin
                         raise_stack_fault(1'b0);
                         if (control_word[0])
                             write_stack(st0_index, x87_indefinite());
-                    end else if ((stack_read_data_a.exp > 15'h3fff) ||
-                                 ((stack_read_data_a.exp == 15'h3fff) &&
-                                  (stack_read_data_a.sig !=
-                                   {1'b1, 52'h0}))) begin
-                        status_flags[10] <= 1'b1; // C2: range incomplete
                     end else begin
-                        status_flags[10] <= 1'b0;
                         command_complete_pulse <= 1'b0;
-                        logexp_fyl2x <= 1'b0;
-                        logexp_input <= stack_read_data_a;
-                        if (stack_read_data_a.exp < 15'd16331) begin
-                            logexp_address <= stack_read_data_a.sign
-                                            ? 10'd512 : 10'd256;
-                            logexp_fraction <= 8'h00;
-                            logexp_phase <= LOGEXP_LOOKUP;
-                        end else if (stack_read_data_a.exp == 15'd16383) begin
-                            logexp_address <= stack_read_data_a.sign
-                                            ? 10'd769 : 10'd768;
-                            logexp_fraction <= 8'h00;
-                            logexp_phase <= LOGEXP_LOOKUP;
-                        end else begin
-                            logexp_argument_shift <= stack_read_data_a.sig;
-                            logexp_argument_shift_count <= 6'(
-                                15'd16383 - stack_read_data_a.exp);
-                            logexp_phase <= LOGEXP_ARGUMENT_SHIFT;
-                        end
+                        arith_compare <= 1'b0;
+                        arith_write_result <= 1'b1;
+                        arith_pop_count <= 2'd0;
+                        arith_dest_index <= st0_index;
+                        arith_operand_a <= stack_read_data_a;
+                        arith_operand_b <= stack_read_data_a; // the program's xneg
+                        trans_cosine <= 1'b0;
+                        trans_atan2 <= 1'b0;
+                        trans_logexp <= X87_TRANS_F2XM1;
+                        v2_exec_op <= X87_ARITH_TRANS;
+                        v2_exec_owner <= EXEC_MATH;
+                        v2_exec_size <= 2'd0;
+                        v2_exec_transfer <= 64'h0;
+                        v2_exec_pending <= 1'b1;
                     end
                 end
                 X87_CMD_FSCALE: begin
@@ -2718,6 +2521,7 @@ always_ff @(posedge clk) begin
                         arith_operand_b <= x87_empty();
                         trans_cosine <= command_decode.argument[0];
                         trans_atan2 <= 1'b0;
+                        trans_logexp <= X87_TRANS_NONE;
                         v2_exec_op <= X87_ARITH_TRANS;
                         v2_exec_owner <= EXEC_MATH;
                         v2_exec_size <= 2'd0;

@@ -16,6 +16,7 @@ module x87_executor
     input  logic                 quiet_compare,      // Suppress QNaN invalid exception.
     input  logic                 trans_cosine,       // Select cosine instead of sine.
     input  logic                 trans_atan2,        // Select two-operand arctangent.
+    input  logic           [1:0] trans_logexp,       // X87_TRANS_F2XM1/FYL2X/FYL2XP1.
     input  x87_reg_t             operand,            // Primary numeric operand.
     input  x87_reg_t             operand_b,          // Secondary numeric operand.
     input  logic          [63:0] transfer_in,        // Raw load/conversion input bits.
@@ -397,6 +398,23 @@ function automatic logic is_zero(input x87_reg_t value);
     return value.class_id == X87_ZERO;
 endfunction
 
+// Exactly 1 in magnitude (no guard, round or sticky bits).
+function automatic logic is_unit(input x87_reg_t value);
+    return (value.class_id == X87_NORMAL) && (value.exp == 15'h3fff) &&
+           (value.sig == {1'b1, 52'h0}) &&
+           !value.guard_bit && !value.round_bit && !value.sticky_bit;
+endfunction
+
+function automatic x87_reg_t trans_power_of_two(input logic sign, input logic [14:0] exp);
+    x87_reg_t value;
+    value = '0;
+    value.sign = sign;
+    value.exp = exp;
+    value.sig = {1'b1, 52'h0};
+    value.class_id = X87_NORMAL;
+    return value;
+endfunction
+
 function automatic logic is_finite(input x87_reg_t value);
     return (value.class_id == X87_NORMAL) ||
            (value.class_id == X87_DENORMAL);
@@ -546,7 +564,8 @@ always_ff @(posedge clk) begin
                  (exec_op == X87_ARITH_TRANS)) &&
                 ((operand.class_id == X87_DENORMAL) ||
                  (((exec_op == X87_ARITH_DIV) ||
-                   ((exec_op == X87_ARITH_TRANS) && trans_atan2)) &&
+                   ((exec_op == X87_ARITH_TRANS) &&
+                    (trans_atan2 || trans_logexp[1]))) &&
                   (operand_b.class_id == X87_DENORMAL)));
             range_incomplete <= 1'b0;
             rounded_up <= 1'b0;
@@ -777,6 +796,13 @@ always_ff @(posedge clk) begin
 
                 X87_CLASSIFY_TRANS: begin
                     logic signed [16:0] unbiased_exp;
+                    logic log1p;        // FYL2XP1: the logarithm's argument is 1 + x
+                    logic log_invalid;  // ... is negative
+                    logic log_zero;     // ... is 0: -inf
+                    logic log_inf;      // ... is +inf
+                    logic log_unit;     // ... is 1: the logarithm is a zero
+                    logic log_zsign;    // that zero's sign (FYL2XP1: x's)
+                    logic log_neg;      // the logarithm is negative (finite, nonzero)
 
                     // Special and out-of-range operands commit directly; a
                     // finite operand finishes with no commit and x87_control
@@ -785,9 +811,97 @@ always_ff @(posedge clk) begin
                                    17'sd16383;
                     direct_ready_r <= 1'b1;
 
+                    // FYL2X(P1): y in operand, x in operand_b. As Intel's
+                    // tables: NaNs, then invalid (log of a negative, 0 * inf),
+                    // the zero divide of log(0) with a finite y, and exact
+                    // infinities and zeros. Outside FYL2XP1's domain
+                    // (|x| >= 1 - sqrt(2)/2, undefined) it is y * log2(1 + x).
+                    log1p = trans_logexp[0];
+                    if (log1p) begin
+                        log_invalid = operand_b.sign && (operand_b.exp >= 15'h3fff) &&
+                                      !is_unit(operand_b);           // x < -1
+                        log_zero = operand_b.sign && is_unit(operand_b);
+                        log_unit = is_zero(operand_b);
+                        log_zsign = operand_b.sign;
+                        log_neg = operand_b.sign;
+                    end else begin
+                        log_invalid = operand_b.sign && !is_zero(operand_b);
+                        log_zero = is_zero(operand_b);
+                        log_unit = is_unit(operand_b) && !operand_b.sign;
+                        log_zsign = 1'b0;
+                        log_neg = operand_b.exp < 15'h3fff;
+                    end
+                    log_inf = is_infinity(operand_b) && !operand_b.sign;
+
+                    if (trans_logexp == X87_TRANS_F2XM1) begin
+                        // 2^x - 1 for |x| <= 1; outside (undefined) x stays
+                        // with C2 set; -inf gives -1, +inf itself; results
+                        // below 2^-16382 flush to zero.
+                        if (is_nan(operand)) begin
+                            result_r <= quiet_nan(operand);
+                            invalid <= is_signaling_nan(operand);
+                        end else if (operand.class_id == X87_EMPTY) begin
+                            result_r <= x87_indefinite();
+                            invalid <= 1'b1;
+                        end else if (is_zero(operand)) begin
+                            result_r <= operand;
+                        end else if (is_infinity(operand)) begin
+                            result_r <= operand.sign
+                                      ? trans_power_of_two(1'b1, 15'h3fff) : operand;
+                        end else if (is_unit(operand)) begin
+                            result_r <= trans_power_of_two(operand.sign,
+                                                           operand.sign ? 15'h3ffe : 15'h3fff);
+                        end else if (operand.exp >= 15'h3fff) begin
+                            result_r <= operand;
+                            range_incomplete <= 1'b1;
+                        end else if (operand.exp <= 15'd1) begin
+                            result_r <= x87_zero(operand.sign);
+                            underflow <= 1'b1;
+                            inexact <= 1'b1;
+                        end else begin
+                            direct_ready_r <= 1'b0;
+                        end
+                    end else if (trans_logexp != X87_TRANS_NONE) begin
+                        if (is_nan(operand) || is_nan(operand_b)) begin
+                            result_r <= is_nan(operand) ? quiet_nan(operand)
+                                                       : quiet_nan(operand_b);
+                            invalid <= is_signaling_nan(operand) ||
+                                       is_signaling_nan(operand_b);
+                        end else if ((operand.class_id == X87_EMPTY) ||
+                                     (operand_b.class_id == X87_EMPTY) || log_invalid) begin
+                            result_r <= x87_indefinite();
+                            invalid <= 1'b1;
+                        end else if (log_zero || log_inf) begin
+                            if (is_zero(operand)) begin
+                                result_r <= x87_indefinite();
+                                invalid <= 1'b1;
+                            end else begin
+                                result_r <= x87_infinity(operand.sign ^ log_zero);
+                                divide_by_zero <= log_zero && is_finite(operand);
+                            end
+                        end else if (log_unit) begin
+                            if (is_infinity(operand)) begin
+                                result_r <= x87_indefinite();
+                                invalid <= 1'b1;
+                            end else begin
+                                result_r <= x87_zero(operand.sign ^ log_zsign);
+                            end
+                        end else if (is_infinity(operand)) begin
+                            result_r <= x87_infinity(operand.sign ^ log_neg);
+                        end else if (is_zero(operand)) begin
+                            result_r <= x87_zero(operand.sign ^ log_neg);
+                        end else if ((operand.class_id == X87_DENORMAL) ||
+                                     (log1p && (operand_b.exp < 15'd64))) begin
+                            // y or FYL2XP1's x below 2^-16319: flushed.
+                            result_r <= x87_zero(operand.sign ^ log_neg);
+                            underflow <= 1'b1;
+                            inexact <= 1'b1;
+                        end else begin
+                            direct_ready_r <= 1'b0;
+                        end
                     // FPATAN's special results (multiples of pi/4) are the
                     // nearest 53-bit values; y's sign.
-                    if (trans_atan2 &&
+                    end else if (trans_atan2 &&
                         (is_nan(operand) || is_nan(operand_b))) begin
                         result_r <= is_nan(operand) ? quiet_nan(operand)
                                                    : quiet_nan(operand_b);
