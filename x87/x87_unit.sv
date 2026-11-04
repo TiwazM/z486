@@ -71,10 +71,12 @@ wire  [1:0] l_parts = l_m80 ? 2'd3 : l_m64 ? 2'd2 : 2'd1;
 wire        l_status = (launch_fop == 11'h7e0) ||
                        (!l_reg && (l_op == 3'd7) && ((l_esc == 3'd1) || (l_esc == 3'd5)));
 wire        l_regcmd = l_reg && !((l_esc == 3'd7) && l_op[2]);    // x87-reg forms
+// FLDCW (D9 /5): its RD words hand in the control word (x87-fldcw).
+wire        l_fldcw = !l_reg && (l_esc == 3'd1) && (l_op == 3'd5);
 // Loads whose RD words hand in the operand (x87-m16/m64/m80-load): DC-DF
-// memory forms and DB /5; the m32 loads use direct_mem_req.
+// memory forms and DB /5, and FLDCW; the m32 loads use direct_mem_req.
 wire        l_operand = !l_reg && !l_store && !l_status &&
-                        (l_esc[2] || ((l_esc[1:0] == 2'b11) && (l_op == 3'd5)));
+                        (l_esc[2] || ((l_esc[1:0] == 2'b11) && (l_op == 3'd5)) || l_fldcw);
 
 logic        queue_safe;           // Masked-exception mode permits one queued command.
 logic        mask_load_pending;    // ...and no mask load in flight can withdraw that.
@@ -93,6 +95,7 @@ wire         m32_valid = direct_active && direct_data_valid_r;
 // operand and the m80 tail, which are words: one part (m16) or three (m80)
 // end in two bytes.
 logic        op_taken_r;           // The issued x87 overlay reads its operand in microcode.
+logic        op_ctrl_r;            // ...the control word (FLDCW): nothing to record.
 logic        op_part_r;            // Sample OPR_R as the next part now.
 logic        op_post_r;            // Post the load with OPR_R as its last part.
 logic  [1:0] op_parts_r;           // Parts sampled before the last.
@@ -155,7 +158,8 @@ wire         own_cmd = dcmd_sel;
 assign direct_taken = direct_active || direct_reg_r || direct_st_r || op_taken_r;
 assign direct_reg_taken = direct_reg_r;
 wire         direct_release = direct_valid && direct_ready;
-assign load_commit = direct_release;
+// FLDCW records no FIP/FCS:FOP or operand, as its original routine does not.
+assign load_commit = direct_release && !op_ctrl_r;
 
 assign direct_mem_req = direct_active && !direct_issued_r && !direct_data_valid_r;
 assign store_hold = direct_st_r && store_word && (st_state != ST_DONE);
@@ -279,6 +283,7 @@ always_ff @(posedge clk) begin
         direct_data_valid_r <= 1'b0;
         direct_data_r       <= 32'h0;
         op_taken_r          <= 1'b0;
+        op_ctrl_r           <= 1'b0;
         op_part_r           <= 1'b0;
         op_post_r           <= 1'b0;
         op_parts_r          <= 2'd0;
@@ -346,6 +351,7 @@ always_ff @(posedge clk) begin
                                  queue_safe && !mask_load_pending;
             op_taken_r          <= ENABLE_X87 && direct_candidate && l_operand &&
                                  direct_allowed && queue_safe && !mask_load_pending;
+            op_ctrl_r           <= l_fldcw;
             op_part_r           <= 1'b0;
             op_post_r           <= 1'b0;
             op_parts_r          <= 2'd0;

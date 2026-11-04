@@ -37,6 +37,10 @@ function automatic logic [11:0] recipe_effective_entry(
             if (modrm[7:6] != 2'b11)
                 recipe_effective_entry = 12'hA16;
         end
+        12'h4DF: begin
+            if (modrm[7:6] != 2'b11)
+                recipe_effective_entry = 12'hA4A;
+        end
         12'h4C1: begin
             if (modrm[7:6] == 2'b11)
                 recipe_effective_entry = 12'h9D1;
@@ -87,6 +91,7 @@ function automatic logic [11:0] recipe_fallback_entry(input logic [11:0] entry);
         12'hA00: recipe_fallback_entry = 12'h4DB;
         12'hA0A: recipe_fallback_entry = 12'h4D3;
         12'hA16: recipe_fallback_entry = 12'h4E0;
+        12'hA4A: recipe_fallback_entry = 12'h4DF;
         12'h9D1: recipe_fallback_entry = 12'h4C1;
         12'h9D3: recipe_fallback_entry = 12'h53C;
         12'hA20: recipe_fallback_entry = 12'h540;
@@ -106,6 +111,7 @@ function automatic logic [1:0] recipe_action(input logic [11:0] entry);
         12'hA00: recipe_action = RECIPE_ACTION_X87_OVERLAY;
         12'hA0A: recipe_action = RECIPE_ACTION_X87_OVERLAY;
         12'hA16: recipe_action = RECIPE_ACTION_X87_OVERLAY;
+        12'hA4A: recipe_action = RECIPE_ACTION_X87_OVERLAY;
         12'h9D1: recipe_action = RECIPE_ACTION_X87_OVERLAY;
         12'h9D3: recipe_action = RECIPE_ACTION_X87_OVERLAY;
         12'hA20: recipe_action = RECIPE_ACTION_X87_OVERLAY;
@@ -401,6 +407,10 @@ function automatic recipe_meta_t recipe_metadata(input dec_entry_t e);
                 r.commit_sel = RECIPE_ACTION_X87_DIRECT; r.uses_ea = 1'b1;
             end
             12'hA16: begin
+                // Direct x87 transport; normal sequencer retirement.
+                r.commit_sel = RECIPE_ACTION_X87_DIRECT; r.uses_ea = 1'b1;
+            end
+            12'hA4A: begin
                 // Direct x87 transport; normal sequencer retirement.
                 r.commit_sel = RECIPE_ACTION_X87_DIRECT; r.uses_ea = 1'b1;
             end

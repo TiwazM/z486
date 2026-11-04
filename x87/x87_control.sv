@@ -105,6 +105,8 @@ logic [10:0] direct_fop_r;
 logic [79:0] direct_data_r;
 logic  [1:0] direct_words_r;
 logic        direct_tail16_r;
+logic        masked_cw_load_r;         // The command is a direct FLDCW of a control
+                                       // word that keeps every exception masked.
 logic  [1:0] direct_tail_words;        // Fragments still to enter the transfer queue.
 logic [47:0] direct_tail_data;         // ...low fragment first.
 
@@ -878,11 +880,16 @@ assign error_n = !status_flags[7];
 assign queue_safe = &control_word[5:0] && error_n;
 // A mask load from the command port to the receive that completes it. The CPU
 // takes a direct load only when queue_safe cannot fall before its operand is
-// queued: with every exception masked, nothing else can raise ES.
+// queued: with every exception masked, nothing else can raise ES. A direct
+// FLDCW (taken only with every exception masked) whose control word masks
+// every exception again cannot make queue_safe fall: it is no mask load here.
 assign mask_load_pending = (cmd_valid && fop_loads_masks(cmd_fop)) ||
-                           (command_pending && fop_loads_masks(command_fop)) ||
-                           (rx_kind == RX_CONTROL) || (rx_kind == RX_ENV) ||
-                           (rx_kind == RX_STATE);
+                           (direct_pending && fop_loads_masks(direct_fop_r) &&
+                            (direct_data_r[5:0] != 6'h3f)) ||
+                           (command_pending && fop_loads_masks(command_fop) &&
+                            !masked_cw_load_r) ||
+                           ((rx_kind == RX_CONTROL) && !masked_cw_load_r) ||
+                           (rx_kind == RX_ENV) || (rx_kind == RX_STATE);
 
 // One physical three-word queue serves both protocol directions. A command
 // cannot change direction until the queue is empty.
@@ -1142,6 +1149,7 @@ always_ff @(posedge clk) begin
         direct_data_r <= 80'h0;
         direct_words_r <= 2'd1;
         direct_tail16_r <= 1'b0;
+        masked_cw_load_r <= 1'b0;
         direct_tail_words <= 2'd0;
         direct_tail_data <= 48'h0;
         stack_addr_a <= 3'd0;
@@ -1942,6 +1950,7 @@ always_ff @(posedge clk) begin
             last_fop <= core_cmd_fop;
             command_fop <= core_cmd_fop;
             command_pending <= 1'b1;
+            masked_cw_load_r <= core_cmd_direct && (direct_data_r[5:0] == 6'h3f);
             stack_addr_a <= top;
             stack_addr_b <= ((fop_decode_key(core_cmd_fop) == 11'h530) ||
                              (core_cmd_fop == 11'h1f1) ||   // FYL2X

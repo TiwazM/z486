@@ -353,6 +353,29 @@ PATCHES = [
     Patch(0xA1D, "x87 m16 load overlay: RNI delay slot",
           copy_from=0x20E),
 
+    # FLDCW (4DF, which sets MISC2 and runs the m16 load routine) reads the
+    # control word as x87-m16-load does and posts it to the direct queue:
+    # the x87 unit takes it only when every exception is masked and no other
+    # mask load is in flight, and x87_control reports the FLDCW as a mask
+    # load (mask_load_pending) from the direct queue until its receive
+    # completes. As in the original routine, nothing is recorded.
+    Patch(0xA4A, "x87 FLDCW overlay: fallback point, word operand",
+          copy_from=0x030, fields=dict(aluop=ALUJMP_BITS16)),
+    Patch(0xA4B, "x87 FLDCW overlay: fallback delay slot",
+          copy_from=0x20E),
+    Patch(0xA4C, "x87 FLDCW overlay: RD the control word",
+          copy_from=0x030, fields=dict(bus=BUS_RD)),
+    Patch(0xA4D, "x87 FLDCW overlay: DLY",
+          copy_from=0x20E),
+    Patch(0xA4E, "x87 FLDCW overlay: control word to the x87 unit, post the load",
+          copy_from=0x030, fields=dict(src=SRC_OPR_R, dst=DEST_USTEP_X87_POST)),
+    Patch(0xA4F, "x87 FLDCW overlay: wait for the x87 to accept the load",
+          copy_from=0x20E),
+    Patch(0xA50, "x87 FLDCW overlay: retire",
+          copy_from=0x20F),
+    Patch(0xA51, "x87 FLDCW overlay: RNI delay slot",
+          copy_from=0x20E),
+
     # Register-form FP instructions (4C1) post their FOP straight to the
     # integrated x87; hardware records FIP/FCS/FOP (the 4CE/4CF/4D0 moves) when
     # the direct path is taken, so neither word writes state and the fallback
@@ -824,6 +847,11 @@ OVERLAY_RECIPES = [
                   ("ea", "paging", "x87-order"), True),
     OverlayRecipe("x87-m16-load", 0x4E0, 0xA16, EarlyKind.SEQ,
                   (0xA16, 0xA17, 0xA18, 0xA19, 0xA1A, 0xA1B, 0xA1C, 0xA1D),
+                  OverlayQualifier.X87_MEM,
+                  RecipeAction.X87_OVERLAY, "x87-direct-operand",
+                  ("ea", "paging", "x87-order"), True),
+    OverlayRecipe("x87-fldcw", 0x4DF, 0xA4A, EarlyKind.SEQ,
+                  (0xA4A, 0xA4B, 0xA4C, 0xA4D, 0xA4E, 0xA4F, 0xA50, 0xA51),
                   OverlayQualifier.X87_MEM,
                   RecipeAction.X87_OVERLAY, "x87-direct-operand",
                   ("ea", "paging", "x87-order"), True),
