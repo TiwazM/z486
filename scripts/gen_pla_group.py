@@ -64,7 +64,8 @@ def casez_eval(pats, addr: int, width: int) -> int:
 # group ROM address alone determines the recipe (scripts/gen_recipe_rom.py):
 #   82        alias of 80 (no hardwired recipe), row shared with 80/81/83
 #   0F 12/13  undefined, row shared with MOV r,m (8A/8B)
-#   DA        integer m32 x87 forms, row shared with D8 (direct m32 load)
+#   DA        integer m32 x87 forms, row shared with D8; both now take the
+#             direct m32 load, so this row only keeps the ROM layout stable
 SPLIT_GROUPS = {(0, 0x82): 0x3D, (1, 0x12): 0x3E, (1, 0x13): 0x3E,
                 (0, 0xDA): 0x3F}
 

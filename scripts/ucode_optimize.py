@@ -92,7 +92,7 @@ class EarlyKind(IntEnum):
 class OverlayQualifier(IntEnum):
     """Structured decoder predicates for optimizer-owned entry overlays."""
 
-    X87_M32_FLOAT = 1
+    X87_M32_LOAD = 1
     RMW_MEMORY = 2
     RMW_UNARY = 3
     X87_REG = 4
@@ -259,27 +259,30 @@ PATCHES = [
     Patch(0x9CA, "NOP extension: blank RNI delay slot",
           copy_from=0x030),
 
-    # D8 m32 arithmetic and D9 /0 FLD use a paging-owned demand read and post
-    # the completed operand directly to the integrated x87. Dynamic CR0/x87
-    # eligibility falls back to the original 4D7 routine.
+    # Every one-dword x87 load (4D7: D8 and DA m32 arithmetic, D9 /0 FLD m32,
+    # DB /0 FILD m32) uses a paging-owned demand read and posts the completed
+    # operand directly to the integrated x87. Dynamic CR0/x87 eligibility
+    # falls back to the original 4D7 routine.
     Patch(0x9C5, "x87 m32 direct-load overlay: wait for fault-checked operand",
           copy_from=0x20E),
     Patch(0x9C6, "x87 m32 direct-load overlay: retire after x87 queue accepts operand",
           copy_from=0x20F),
 
-    # The m64 loads (4DB: DC arithmetic, DD /0 FLD, DF /5 FILD) read their
-    # operand with ordinary RD words, as the 386 loop at 506-50B does, but
-    # without its coprocessor port writes: the word after each DLY hands
-    # OPR_R to the x87 unit (X87_OPERAND), and X87_POST hands the last part
-    # and posts FOP and operand together. Each RD is limit-checked and
+    # The other x87 loads (4DB m64: DC arithmetic, DD /0 FLD, DF /5 FILD;
+    # 4D3 m80: DB /5 FLD, DF /4 FBLD; 4E0 m16: DE arithmetic, DF /0 FILD)
+    # read their operand with ordinary RD words, as the 386 loop at 506-50B
+    # does, but without its coprocessor port writes: the word after each DLY
+    # hands OPR_R to the x87 unit (X87_OPERAND), and X87_POST hands the last
+    # part and posts FOP and operand together. Each RD is limit-checked and
     # translated on its own, so a fault in any part restarts the instruction
-    # before the x87 has seen anything. The parts are read as BITS32 RDs with
-    # IND += 4 between them. The first word is the fallback point and BITS32
-    # is its only work: the original routine sets the operand size before it
-    # uses it, so the fallback stays clean, and the blank second word is its
-    # jump delay slot. The x87 unit holds the instruction from the cycle after
-    # X87_POST until the x87 accepts the operand, so the blank word after
-    # X87_POST may be skipped while it waits.
+    # before the x87 has seen anything. Dword parts are read as BITS32 RDs
+    # with IND += 4 between them; the m80 tail and the m16 operand as BITS16
+    # RDs, which read and check only their two bytes. The first word is the
+    # fallback point and BITS32/BITS16 is its only work: the original routine
+    # sets the operand size before it uses it, so the fallback stays clean,
+    # and the blank second word is its jump delay slot. The x87 unit holds
+    # the instruction from the cycle after X87_POST until the x87 accepts the
+    # operand, so the blank word after X87_POST may be skipped while it waits.
     Patch(0xA00, "x87 m64 load overlay: fallback point, dword operand parts",
           copy_from=0x030, fields=dict(aluop=ALUJMP_BITS32)),
     Patch(0xA01, "x87 m64 load overlay: fallback delay slot",
@@ -300,6 +303,51 @@ PATCHES = [
     Patch(0xA08, "x87 m64 load overlay: retire",
           copy_from=0x20F),
     Patch(0xA09, "x87 m64 load overlay: RNI delay slot",
+          copy_from=0x20E),
+
+    Patch(0xA0A, "x87 m80 load overlay: fallback point, dword operand parts",
+          copy_from=0x030, fields=dict(aluop=ALUJMP_BITS32)),
+    Patch(0xA0B, "x87 m80 load overlay: fallback delay slot",
+          copy_from=0x20E),
+    Patch(0xA0C, "x87 m80 load overlay: RD part 0",
+          copy_from=0x030, fields=dict(bus=BUS_RD)),
+    Patch(0xA0D, "x87 m80 load overlay: DLY, IND += 4",
+          copy_from=0x030, fields=dict(sub=0, bus=BUS_IND_PLUS, alusrc=ALUSRC_CONST_4)),
+    Patch(0xA0E, "x87 m80 load overlay: RD part 1, part 0 to the x87 unit",
+          copy_from=0x030, fields=dict(bus=BUS_RD, src=SRC_OPR_R,
+                                       dst=DEST_USTEP_X87_OPERAND)),
+    Patch(0xA0F, "x87 m80 load overlay: DLY, IND += 4, word tail",
+          copy_from=0x030, fields=dict(sub=0, bus=BUS_IND_PLUS, alusrc=ALUSRC_CONST_4,
+                                       aluop=ALUJMP_BITS16)),
+    Patch(0xA10, "x87 m80 load overlay: RD tail word, part 1 to the x87 unit",
+          copy_from=0x030, fields=dict(bus=BUS_RD, src=SRC_OPR_R,
+                                       dst=DEST_USTEP_X87_OPERAND)),
+    Patch(0xA11, "x87 m80 load overlay: DLY",
+          copy_from=0x20E),
+    Patch(0xA12, "x87 m80 load overlay: tail to the x87 unit, post the load",
+          copy_from=0x030, fields=dict(src=SRC_OPR_R, dst=DEST_USTEP_X87_POST)),
+    Patch(0xA13, "x87 m80 load overlay: wait for the x87 to accept the load",
+          copy_from=0x20E),
+    Patch(0xA14, "x87 m80 load overlay: retire",
+          copy_from=0x20F),
+    Patch(0xA15, "x87 m80 load overlay: RNI delay slot",
+          copy_from=0x20E),
+
+    Patch(0xA16, "x87 m16 load overlay: fallback point, word operand",
+          copy_from=0x030, fields=dict(aluop=ALUJMP_BITS16)),
+    Patch(0xA17, "x87 m16 load overlay: fallback delay slot",
+          copy_from=0x20E),
+    Patch(0xA18, "x87 m16 load overlay: RD the operand",
+          copy_from=0x030, fields=dict(bus=BUS_RD)),
+    Patch(0xA19, "x87 m16 load overlay: DLY",
+          copy_from=0x20E),
+    Patch(0xA1A, "x87 m16 load overlay: operand to the x87 unit, post the load",
+          copy_from=0x030, fields=dict(src=SRC_OPR_R, dst=DEST_USTEP_X87_POST)),
+    Patch(0xA1B, "x87 m16 load overlay: wait for the x87 to accept the load",
+          copy_from=0x20E),
+    Patch(0xA1C, "x87 m16 load overlay: retire",
+          copy_from=0x20F),
+    Patch(0xA1D, "x87 m16 load overlay: RNI delay slot",
           copy_from=0x20E),
 
     # Register-form FP instructions (4C1) post their FOP straight to the
@@ -637,12 +685,22 @@ HARDWIRED_RECIPES = [
 
 OVERLAY_RECIPES = [
     OverlayRecipe("x87-m32-load", 0x4D7, 0x9C5, EarlyKind.LOAD,
-                  (0x9C5, 0x9C6), OverlayQualifier.X87_M32_FLOAT,
+                  (0x9C5, 0x9C6), OverlayQualifier.X87_M32_LOAD,
                   RecipeAction.X87_OVERLAY, "x87-direct-m32",
                   ("ea", "paging", "x87-order")),
     OverlayRecipe("x87-m64-load", 0x4DB, 0xA00, EarlyKind.SEQ,
                   (0xA00, 0xA01, 0xA02, 0xA03, 0xA04, 0xA05, 0xA06, 0xA07,
                    0xA08, 0xA09), OverlayQualifier.X87_MEM_LOAD,
+                  RecipeAction.X87_OVERLAY, "x87-direct-operand",
+                  ("ea", "paging", "x87-order"), True),
+    OverlayRecipe("x87-m80-load", 0x4D3, 0xA0A, EarlyKind.SEQ,
+                  (0xA0A, 0xA0B, 0xA0C, 0xA0D, 0xA0E, 0xA0F, 0xA10, 0xA11,
+                   0xA12, 0xA13, 0xA14, 0xA15), OverlayQualifier.X87_MEM_LOAD,
+                  RecipeAction.X87_OVERLAY, "x87-direct-operand",
+                  ("ea", "paging", "x87-order"), True),
+    OverlayRecipe("x87-m16-load", 0x4E0, 0xA16, EarlyKind.SEQ,
+                  (0xA16, 0xA17, 0xA18, 0xA19, 0xA1A, 0xA1B, 0xA1C, 0xA1D),
+                  OverlayQualifier.X87_MEM_LOAD,
                   RecipeAction.X87_OVERLAY, "x87-direct-operand",
                   ("ea", "paging", "x87-order"), True),
     OverlayRecipe("x87-reg", 0x4C1, 0x9D1, EarlyKind.NONE,
@@ -868,8 +926,9 @@ def render_recipe_svh(words: list[int]) -> str:
         return ", ".join(f"12'h{recipes[name].entry:03X}" for name in names)
 
     def overlay_qualifier_expr(recipe: OverlayRecipe) -> str:
-        if recipe.qualifier == OverlayQualifier.X87_M32_FLOAT:
-            return "(opcode == 8'hD8) || ((opcode == 8'hD9) && (modrm[5:3] == 3'd0))"
+        if recipe.qualifier == OverlayQualifier.X87_M32_LOAD:
+            return "(opcode == 8'hD8) || (opcode == 8'hDA) || " \
+                   "(((opcode == 8'hD9) || (opcode == 8'hDB)) && (modrm[5:3] == 3'd0))"
         if recipe.qualifier == OverlayQualifier.X87_MEM_LOAD:
             return "modrm[7:6] != 2'b11"
         if recipe.qualifier == OverlayQualifier.X87_REG:
