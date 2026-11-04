@@ -35,6 +35,7 @@ module x87_control
     output logic        pereq,                  // CPU operand-transfer/completion request.
     output logic        error_n,                // Active-low unmasked-error status.
     output logic        queue_safe,             // Masked exceptions permit one queued command.
+    output logic        mask_load_pending,      // FLDCW, FLDENV or FRSTOR has not loaded its masks.
 
     // Low-rate hardware diagnostics; sampled only by the MiSTer watchdog.
     output logic [31:0] debug_state             // Packed command/executor progress.
@@ -348,6 +349,13 @@ function automatic logic fop_reads_status(input logic [10:0] fop);
     return (fop == 11'h7e0) ||
            ((fop[10:8] == 3'd5) && (fop[7:6] != 2'b11) &&
             (fop[5:3] == 3'b111));
+endfunction
+
+// FLDCW, FLDENV and FRSTOR load the exception masks.
+function automatic logic fop_loads_masks(input logic [10:0] fop);
+    return (fop[7:6] != 2'b11) &&
+           (((fop[10:8] == 3'd1) && ((fop[5:3] == 3'd4) || (fop[5:3] == 3'd5))) ||
+            ((fop[10:8] == 3'd5) && (fop[5:3] == 3'd4)));
 endfunction
 
 function automatic logic [2:0] transfer_byte_count(input logic [3:0] be);
@@ -842,6 +850,13 @@ assign pereq = (rx_kind != RX_NONE) || poly_active ||
                (pereq_release_hold != 2'b00);
 assign error_n = !status_flags[7];
 assign queue_safe = &control_word[5:0] && error_n;
+// A mask load from the command port to the receive that completes it. The CPU
+// takes a direct load only when queue_safe cannot fall before its operand is
+// queued: with every exception masked, nothing else can raise ES.
+assign mask_load_pending = (cmd_valid && fop_loads_masks(cmd_fop)) ||
+                           (command_pending && fop_loads_masks(command_fop)) ||
+                           (rx_kind == RX_CONTROL) || (rx_kind == RX_ENV) ||
+                           (rx_kind == RX_STATE);
 
 // One physical three-word queue serves both protocol directions. A command
 // cannot change direction until the queue is empty.

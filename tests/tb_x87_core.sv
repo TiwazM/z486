@@ -35,7 +35,7 @@ x87_control dut (
     .read_req_be(read_req_be), .read_req_ready(read_req_ready),
     .read_resp_valid(read_resp_valid), .read_resp_data(read_resp_data),
     .busy_n(busy_n), .pereq(pereq), .error_n(error_n),
-    .queue_safe(), .debug_state()
+    .queue_safe(), .mask_load_pending(), .debug_state()
 );
 
 task automatic send_command(input logic [10:0] fop);

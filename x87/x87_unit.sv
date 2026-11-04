@@ -31,6 +31,7 @@ module x87_unit #(
     output logic        store_hold,         // Hold the ROM at the store word until then.
     output logic [31:0] store_opr_data,
     output logic        direct_taken,       // The issued x87 overlay went direct.
+    output logic        load_commit,        // A direct load's operand entered the x87 queue.
     output logic        direct_reg_taken,   // ...as a register form (no operand).
     output logic        direct_active,      // One direct transport owns instruction issue.
     output logic        direct_mem_req,     // Launch fault-checked demand read through paging.
@@ -51,6 +52,7 @@ module x87_unit #(
 );
 
 logic        queue_safe;           // Masked-exception mode permits one queued command.
+logic        mask_load_pending;    // ...and no mask load in flight can withdraw that.
 logic        direct_ready;         // x87_control can capture the direct FOP/data pair.
 logic        direct_issued_r;      // Demand read has crossed the paging handshake.
 logic        direct_crossing_r;    // Dword spans two naturally aligned memory words.
@@ -83,6 +85,7 @@ wire         own_read = st_read_req && !st_read_issued_r;
 assign direct_taken = direct_active || direct_reg_r || direct_st_r;
 assign direct_reg_taken = direct_reg_r;
 wire         direct_release = direct_valid && direct_ready;
+assign load_commit = direct_release;
 
 assign direct_mem_req = direct_active && !direct_issued_r && !direct_data_valid_r;
 assign store_hold = direct_st_r && store_word && (st_state != ST_DONE);
@@ -150,7 +153,8 @@ if (ENABLE_X87) begin : gen_x87
         .read_req_ready(read_req_ready), .read_resp_valid(read_resp_valid),
         .read_resp_data(read_resp_data),
         .busy_n(ctl_busy_n), .pereq(ctl_pereq), .error_n(error_n),
-        .queue_safe(queue_safe), .debug_state(debug_state)
+        .queue_safe(queue_safe), .mask_load_pending(mask_load_pending),
+        .debug_state(debug_state)
     );
 end else begin : gen_no_x87
     assign req_accepted = 1'b0;
@@ -168,6 +172,7 @@ end else begin : gen_no_x87
     assign pereq = 1'b0;
     assign error_n = 1'b1;
     assign queue_safe = 1'b0;
+    assign mask_load_pending = 1'b0;
     assign direct_ready = 1'b0;
     assign debug_state = 32'h8000_0000;
 end
@@ -210,7 +215,8 @@ always_ff @(posedge clk) begin
 
         if (direct_launch) begin
             direct_active       <= ENABLE_X87 && direct_candidate && !direct_reg &&
-                                 !direct_store && direct_allowed && queue_safe;
+                                 !direct_store && direct_allowed && queue_safe &&
+                                 !mask_load_pending;
             direct_st_r         <= ENABLE_X87 && direct_candidate && direct_store && direct_data32 &&
                                  direct_allowed && error_n && (busy_n || queue_safe) &&
                                  !posted_pending && !dcmd_pending_r && (st_state == ST_IDLE);

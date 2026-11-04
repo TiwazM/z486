@@ -98,6 +98,7 @@ module data_unit
     output logic [7:0]  pend_write_mask,          // GPRs a late producer writes on this edge
     input  logic        x87_reg_commit,           // a direct register-form x87 op records FIP/FCS/FOP
     input  logic        x87_store_commit,         // a direct m32 store records FIP/FCS:FOP/operand
+    input  logic        x87_load_commit,          // a direct load records FIP/FCS:FOP/operand
     input  logic [31:0] ind,
     input  logic [31:0] ea,
 
@@ -858,6 +859,14 @@ always_ff @(posedge clk) begin
             fsveip <= tmpeip;
             csopcd <= {5'd0, instr.fop, cs};
             oproff <= ind;
+            tmpf   <= {21'd0, instr.fop};
+        end
+        // The load routine's moves: CSOPCD = FOP << 16 | CS (502), FSVeIP
+        // (505), OPROFF = the operand offset (50C), TMPF (507).
+        if (x87_load_commit) begin
+            fsveip <= tmpeip;
+            csopcd <= {5'd0, instr.fop, cs};
+            oproff <= ea;
             tmpf   <= {21'd0, instr.fop};
         end
 

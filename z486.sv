@@ -448,6 +448,8 @@ wire        x87_store_opr_commit;      // the x87 m32 store result arrived for O
 wire [31:0] x87_store_opr_data;
 wire        x87_store_hold;            // the store word waits for the x87 result
 wire        x87_direct_mem_req;
+wire        x87_load_commit;           // a direct x87 load's operand entered the x87 queue
+reg         x87_load_commit_r;         // ...while no word executed: record it at the next
 
 // Microcode and macro-instruction lifecycle interconnect.
 // After a jump, the next micro-op still executes (delay slot) before jump takes effect.
@@ -1563,8 +1565,10 @@ wire [31:0] issue_seg_base = desc_cache[i_bus.mem_seg[2:0]].base;
 wire        issue_eff_mask = (i_bus.stack_op && pe)
                            ? desc_cache[SEG_SS].D_B : i_bus.addr32;
 
-// Access width for the limit check (source width for MOVZX/MOVSX).
-wire [1:0] gp_access_adj = uc_is_word_op ? 2'd1 :
+// Access width for the limit check (source width for MOVZX/MOVSX). An x87
+// direct m32 read checks its four bytes in 16-bit code too.
+wire [1:0] gp_access_adj = x87_direct_mem_req ? 2'd3 :
+                           uc_is_word_op ? 2'd1 :
                            (srcreg_size == 2'd0) ? 2'd0 : (srcreg_size == 2'd2) ? 2'd3 : 2'd1;
 
 wire        mem_op_eligible, gp_fault_mem_op, gp_fault_wr_op, ss_segment_fault;
@@ -3023,6 +3027,7 @@ data_unit data_unit_inst (
     .x87_reg_commit(uc_exec && i_first && x87_direct_reg_taken &&
                     (i.ucode_action == RECIPE_ACTION_X87_OVERLAY)),
     .x87_store_commit(x87_store_opr_commit),
+    .x87_load_commit(x87_load_commit || x87_load_commit_r),
     .ind(IND),
     .ea(ea_reg),
     // Segmentation and protection: selectors, descriptor and protection sources
@@ -3093,6 +3098,16 @@ wire use_shifter_result = (uc_aluop == ALUJMP_SHIFT2) ||
 // Unit 10: x87 Coprocessor
 //=============================================================================
 
+// A direct x87 load records FIP, FCS:FOP and the operand offset (the
+// 502/505/50C moves of the original routine) when the x87 queues its operand.
+// That may happen while its wait word stalls on paging, so a commit without
+// an executing word is recorded with the next one.
+always_ff @(posedge clk)
+    if (!reset_n || uc_exec)
+        x87_load_commit_r <= 1'b0;
+    else if (x87_load_commit)
+        x87_load_commit_r <= 1'b1;
+
 x87_unit #(.ENABLE_X87(ENABLE_X87)) x87 (
     .clk(clk),
     .reset_n(reset_n),
@@ -3119,6 +3134,7 @@ x87_unit #(.ENABLE_X87(ENABLE_X87)) x87 (
     .store_opr_data(x87_store_opr_data),
     .store_hold(x87_store_hold),
     .direct_taken(x87_direct_taken),
+    .load_commit(x87_load_commit),
     .direct_reg_taken(x87_direct_reg_taken),
     .direct_active(x87_direct_active),
     .direct_mem_req(x87_direct_mem_req),
