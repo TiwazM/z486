@@ -855,10 +855,11 @@ always_ff @(posedge clk) begin
         end
         // The store routine's moves: CSOPCD = FOP << 16 | CS (53D/555/557),
         // OPROFF = the operand offset (53E/575), FSVeIP (56E), TMPF (56A).
+        // IND has moved over a multi-part destination for its check.
         if (x87_store_commit) begin
             fsveip <= tmpeip;
             csopcd <= {5'd0, instr.fop, cs};
-            oproff <= ind;
+            oproff <= ea;
             tmpf   <= {21'd0, instr.fop};
         end
         // The load routine's moves: CSOPCD = FOP << 16 | CS (502), FSVeIP

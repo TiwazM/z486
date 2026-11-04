@@ -444,8 +444,9 @@ wire        x87_error_n;
 wire        x87_direct_active;
 wire        x87_direct_taken;          // the issued x87 overlay went direct
 wire        x87_direct_reg_taken;      // ...as a register form
-wire        x87_store_opr_commit;      // the x87 m32 store result arrived for OPR_R
+wire        x87_store_opr_commit;      // a direct x87 store result (or status word) for OPR_R
 wire [31:0] x87_store_opr_data;
+wire        x87_store_record;          // a direct x87 store records FIP/FCS:FOP/operand
 wire        x87_store_hold;            // the store word waits for the x87 result
 wire        x87_direct_mem_req;
 wire        x87_load_commit;           // a direct x87 load's operand entered the x87 queue
@@ -3026,7 +3027,7 @@ data_unit data_unit_inst (
     .pend_write_mask(pend_write_mask),
     .x87_reg_commit(uc_exec && i_first && x87_direct_reg_taken &&
                     (i.ucode_action == RECIPE_ACTION_X87_OVERLAY)),
-    .x87_store_commit(x87_store_opr_commit),
+    .x87_store_commit(x87_store_record),
     .x87_load_commit(x87_load_commit || x87_load_commit_r),
     .ind(IND),
     .ea(ea_reg),
@@ -3124,20 +3125,14 @@ x87_unit #(.ENABLE_X87(ENABLE_X87)) x87 (
     .direct_candidate(x87_direct_candidate),
     .direct_allowed(!CR0[3] && !CR0[2] && !x87_off),
     .direct_fop(i.fop),
-    .direct_reg(i_bus.modrm[7:6] == 2'b11),
-    .direct_store((i_bus.modrm[7:6] != 2'b11) && ((i_bus.opcode == 8'hD9) || (i_bus.opcode == 8'hDB)) &&
-                  ((i_bus.modrm[5:3] == 3'd2) || (i_bus.modrm[5:3] == 3'd3))),
-    // The m16, m64 and m80 loads (DC-DF, and DB /5) read their operand with
-    // RD words (overlays x87-m16/m64/m80-load); the m32 loads use direct_mem_req.
-    .direct_operand((i_bus.modrm[7:6] != 2'b11) &&
-                    (i_bus.opcode[2] || ((i_bus.opcode[1:0] == 2'b11) &&
-                                         (i_bus.modrm[5:3] == 3'd5)))),
-    .direct_data32(i_bus.data32),
+    .launch_fop(i_bus.fop),
     .operand_part(uc_exec && (uc_dest == DEST_USTEP_X87_OPERAND)),
     .operand_post(uc_exec && (uc_dest == DEST_USTEP_X87_POST)),
     .store_word(uc_active && (uc_dest == DEST_USTEP_X87_STORE)),
     .store_go(uc_active && (uc_dest == DEST_USTEP_X87_STORE) && !stall_mem),
+    .store_exec(uc_exec && (uc_dest == DEST_USTEP_X87_STORE)),
     .store_opr_commit(x87_store_opr_commit),
+    .store_record(x87_store_record),
     .store_opr_data(x87_store_opr_data),
     .store_hold(x87_store_hold),
     .direct_taken(x87_direct_taken),

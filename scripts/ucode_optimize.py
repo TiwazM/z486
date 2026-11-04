@@ -34,6 +34,7 @@ DEST_USTEP_INVLPG = 0x70   # Optimizer-owned: invalidate one TLB page.
 DEST_USTEP_X87_STORE = 0x71 # Optimizer-owned: x87 store command and result read.
 DEST_USTEP_X87_OPERAND = 0x72 # Optimizer-owned: OPR_R is the next x87 operand part.
 DEST_USTEP_X87_POST = 0x73  # Optimizer-owned: OPR_R is the last part; post the load.
+DEST_USTEP_X87_NEXT = 0x74  # Optimizer-owned: OPR_R takes the next x87 result part.
 DEST_USTEP_ALU = 0x7E       # Optimizer-owned: commit this word's ALU result to DSTREG.
 DEST_USTEP_BSWAP = 0x7C     # Optimizer-owned: byte-swap SRCREG into itself.
 ALUJMP_JDESCA = 0x20        # Optimizer-owned: jump if descriptor A bit is set.
@@ -46,8 +47,10 @@ SRC_FOP = 0x3B              # Architectural x87 ESC/ModR/M command.
 SRC_MDTMP = 0x1D            # Multiplier low product / quotient.
 SRC_OPR_R = 0x2D            # Memory read data.
 BUS_RD = 0x16               # Memory read (operand size).
+BUS_CW = 0x0A               # Check the operand for writing; no data transfer.
 BUS_IND_PLUS = 0x1F         # IND += ALU source.
 ALUSRC_CONST_4 = 0x33
+ALUSRC_CONST_NEG4 = 0x37
 ALUJMP_BITS16 = 0x25        # Operand size 16 for the rest of the instruction.
 ALUJMP_BITS32 = 0x27        # Operand size 32 for the rest of the instruction.
 
@@ -359,15 +362,18 @@ PATCHES = [
     Patch(0x9D2, "x87 register direct overlay: retire",
           copy_from=0x20F),
 
-    # FST/FSTP/FIST/FISTP m32 (53C) in 32-bit code: check the destination for
-    # writing first (FSTP pops, so the store must not fault after the
-    # command), then hardware posts the FOP and reads the result into OPR_R,
-    # and the word after writes it back. The first two words write nothing,
-    # so the fallback to 53C (whose protection test raises #NM first) is clean.
+    # FST/FSTP/FIST/FISTP m32 (53C): check the destination for writing first
+    # (FSTP pops, so the store must not fault after the command), then
+    # hardware posts the FOP and takes the result into OPR_R, and the word
+    # after writes it back. The fallback point writes nothing: it is also the
+    # RNI delay slot of x87-reg (9D2). The delay slot sets BITS32, so the
+    # check and the write cover four bytes in 16-bit code too; the original
+    # routine sets its own operand size (53E) before it uses one, so the
+    # fallback to 53C (whose protection test raises #NM first) stays clean.
     Patch(0x9D3, "x87 m32 store overlay: fallback point",
           copy_from=0x20E),
-    Patch(0x9D4, "x87 m32 store overlay: fallback delay slot",
-          copy_from=0x20E),
+    Patch(0x9D4, "x87 m32 store overlay: fallback delay slot, dword destination",
+          copy_from=0x20E, fields=dict(aluop=ALUJMP_BITS32)),
     Patch(0x9D5, "x87 m32 store overlay: check the destination for writing",
           copy_from=0x030, fields=dict(bus=0x0A)),
     Patch(0x9D6, "x87 m32 store overlay: after the check (DLY), command and result read into OPR_R",

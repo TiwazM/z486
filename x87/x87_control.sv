@@ -33,6 +33,10 @@ module x87_control
     output logic        read_resp_valid,        // read_resp_data is valid.
     output logic [31:0] read_resp_data,         // x87-to-CPU status/result data.
 
+    input  logic        result_pop,             // A direct store takes the head result fragment.
+    output logic        result_valid,           // A store result fragment heads the queue.
+    output logic [31:0] result_data,            // ...as the data port would return it.
+
     output logic        busy_n,                 // Active-low arithmetic busy status.
     output logic        pereq,                  // CPU operand-transfer/completion request.
     output logic        error_n,                // Active-low unmasked-error status.
@@ -782,6 +786,11 @@ assign word_in_ready = (rx_kind != RX_NONE) && (direct_tail_words == 2'd0) &&
 assign read_req_ready = !read_resp_valid &&
                         (!read_req_data_port ||
                          ((tx_kind != TX_NONE) && transfer_pop_valid));
+// A direct store takes its result fragments whole, low part first, as the
+// 80386 reads them from the data port, without the bridge round trip. Only
+// the store that produced them is waiting for them.
+assign result_valid = (tx_kind == TX_VALUE) && transfer_pop_valid;
+assign result_data = transfer_pop_data[31:0];
 wire [2:0] rx_fragment_bytes = transfer_byte_count(transfer_pop_data[35:32]);
 wire [3:0] rx_byte_count_next = rx_byte_count + rx_fragment_bytes;
 // The 80386 sends a numeric operand low part first in whole 16-bit words
@@ -921,7 +930,8 @@ always_comb begin
     transfer_pop_ready = (rx_kind != RX_NONE) ? 1'b1
                        : ((tx_kind != TX_NONE) && read_req_valid &&
                           read_req_ready && read_req_data_port &&
-                          tx_entry_consumed);
+                          tx_entry_consumed) ||
+                         (result_pop && (tx_kind == TX_VALUE));
 end
 
 assign tx_produce_fire = (tx_kind != TX_NONE) &&
