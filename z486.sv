@@ -449,6 +449,7 @@ wire [31:0] x87_store_opr_data;
 wire        x87_store_record;          // a direct x87 store records FIP/FCS:FOP/operand
 wire        x87_store_hold;            // the store word waits for the x87 result
 wire        x87_direct_mem_req;
+wire        x87_wait_rni;              // a WAIT the x87 has finished retires (its RNI)
 wire        x87_load_commit;           // a direct x87 load's operand entered the x87 queue
 reg         x87_load_commit_r;         // ...while no word executed: record it at the next
 
@@ -2567,6 +2568,7 @@ microsequencer microsequencer_inst (
     .jcc_fold_active(jcc_fold_active),
     .branch_ustep_rni(branch_ustep_rni),
     .load_wb_retire(direct_wb_retire),
+    .x87_wait_rni(x87_wait_rni),
     .i_rni(i_rni_raw),
     .i_rni_delay(i_rni_delay),
     .i_rni_delay_ea(i_rni_delay_ea),
@@ -3130,6 +3132,11 @@ x87_unit #(.ENABLE_X87(ENABLE_X87)) x87 (
     // test reads CR0 when it runs) decides.
     .direct_allowed(!CR0[3] && !CR0[2] && !x87_off &&
                     !(uc_active && (uc_dest == DEST_CR0))),
+    // WAIT raises #NM only with CR0.MP and TS both set; EM does not matter.
+    // Without a coprocessor it has nothing to wait for.
+    .launch_wait(i_bus.opcode == 8'h9B),
+    .wait_allowed(!(CR0[1] && CR0[3]) && !(uc_active && (uc_dest == DEST_CR0))),
+    .wait_nop(x87_off),
     .direct_fop(i.fop),
     .launch_fop(i_bus.fop),
     .operand_part(uc_exec && (uc_dest == DEST_USTEP_X87_OPERAND)),
@@ -3148,6 +3155,7 @@ x87_unit #(.ENABLE_X87(ENABLE_X87)) x87 (
     .direct_active(x87_direct_active),
     .direct_mem_req(x87_direct_mem_req),
     .direct_stall(stall_x87_direct),
+    .wait_rni(x87_wait_rni),
     .mem_accepted(mem_accepted),
     .mem_addr_low(ind_linear[1:0]),
     .mem_read_complete(mem_read_complete || (ucrd_hit && ucrd_x87_r)),

@@ -21,6 +21,9 @@ module x87_unit #(
     input  logic        direct_launch,      // Instruction issue checks the x87 overlays.
     input  logic        direct_candidate,   // Recipe is an eligible direct x87 form.
     input  logic        direct_allowed,     // CR0 and runtime policy permit x87 use.
+    input  logic        launch_wait,        // The issuing instruction is WAIT (9B).
+    input  logic        wait_allowed,       // CR0.MP and TS not both set (no CR0 write in flight).
+    input  logic        wait_nop,           // No coprocessor: WAIT has nothing to wait for.
     input  logic [10:0] direct_fop,         // FOP of the executing instruction.
     input  logic [10:0] launch_fop,         // FOP of the issuing instruction (its x87 form).
     input  logic        operand_part,       // An X87_OPERAND word executed: OPR_R is next.
@@ -39,6 +42,7 @@ module x87_unit #(
     output logic        direct_active,      // One direct transport owns instruction issue.
     output logic        direct_mem_req,     // Launch fault-checked demand read through paging.
     output logic        direct_stall,       // Hold retirement until control accepts the operand.
+    output logic        wait_rni,           // The WAIT word retires: an RNI for it.
 
     input  logic        mem_accepted,
     input  logic [1:0]  mem_addr_low,
@@ -56,6 +60,8 @@ module x87_unit #(
 
 // The issuing x87 form, from its FOP ({opcode[2:0], ModR/M}). Only the
 // optimizer's x87 overlays are candidates; these name which one runs.
+// launch_fop of a WAIT is not an x87 form: the ESC paths below skip it.
+wire        esc_candidate = direct_candidate && !launch_wait;
 wire        l_reg = launch_fop[7:6] == 2'b11;
 wire  [2:0] l_esc = launch_fop[10:8];          // D8 + l_esc
 wire  [2:0] l_op  = launch_fop[5:3];           // ModR/M.reg
@@ -157,6 +163,25 @@ logic [31:0] st_part1_r;           // ...and the parts after it.
 logic [15:0] st_part2_r;
 logic        st_commit_r;          // OPR_R takes st_part0_r: ST_DONE's first
                                    // cycle, and the cycle after an X87_NEXT word.
+// WAIT (x87-wait): one word, X87_STORE, which holds in place (store_hold)
+// until the x87 has completed every command before it, status included
+// (x87_quiet, as the status reads wait). Then, with nothing to report, the
+// word retires with an RNI of its own (wait_rni) and x87_direct_taken, a NOP
+// from there on; with an unmasked exception pending it runs untaken, and the
+// original routine (its fallback) reports the exception as it always has:
+// #MF with CR0.NE, else FERR# (IRQ13) while it polls, until IGNNE#. The
+// routine is also taken at once with CR0.MP and TS set (#NM) or a CR0 write
+// beside the issue, and when the x87 is on a long operation: the word holds
+// while the x87 runs plain arithmetic or a held command (queue_short, as the
+// register-command wait), or for at most 32 consecutive cycles of anything
+// else (a transcendental, FPREM, BCD, ...). The hold takes no interrupt;
+// the routine polls BUSY# and takes interrupts, restarting the WAIT.
+// Without a coprocessor WAIT is a NOP but for #NM.
+logic        wait_hold_r;          // The issued WAIT's word holds: the x87 is not done.
+logic        wait_go_r;            // ...or retires as a NOP.
+logic  [4:0] wait_slow_r;          // Held cycles in a row the x87 ran no plain operation.
+wire         wait_launch = direct_candidate && launch_wait;
+wire         wait_quiet;           // Every command before the WAIT has completed.
 wire         st_cmd = direct_st_r && store_go && !cancel &&
                       (st_state == ST_IDLE || st_state == ST_CMD);
 wire         result_pop = (st_state == ST_READ) && !st_status_r;
@@ -164,14 +189,16 @@ logic        result_valid;
 logic [31:0] result_data;
 wire         dcmd_sel = dcmd_pending_r || st_cmd;    // a command write (F8)
 wire         own_cmd = dcmd_sel;
-assign direct_taken = direct_active || direct_reg_r || direct_st_r || op_taken_r;
+assign direct_taken = direct_active || direct_reg_r || direct_st_r || op_taken_r ||
+                      wait_go_r;
+assign wait_rni = wait_go_r;
 assign direct_reg_taken = direct_reg_r;
 wire         direct_release = direct_valid && direct_ready;
 // FLDCW records no FIP/FCS:FOP or operand, as its original routine does not.
 assign load_commit = direct_release && !op_ctrl_r;
 
 assign direct_mem_req = direct_active && !direct_issued_r && !direct_data_valid_r;
-assign store_hold = direct_st_r && store_word && (st_state != ST_DONE);
+assign store_hold = store_word && ((direct_st_r && (st_state != ST_DONE)) || wait_hold_r);
 assign store_opr_commit = st_commit_r;
 assign store_record = st_commit_r && (st_state == ST_DONE) && !st_status_r;
 assign store_opr_data = st_part0_r;
@@ -207,6 +234,7 @@ if (ENABLE_X87) begin : gen_x87
     // control may take a command behind a running one: quiet is its own
     // report that every accepted command has completed, status included.
     assign x87_quiet = ctl_quiet && !cmd_valid && !posted_pending;
+    assign wait_quiet = x87_quiet && !dcmd_pending_r;
 
     // The direct command has the bridge to itself: no ESC routine (the only
     // source of paging's x87 cycles) runs while it waits. Paging sees neither
@@ -263,6 +291,7 @@ end else begin : gen_no_x87
     assign status_word = 16'h0;
     assign control_word = 16'h0;
     assign x87_quiet = 1'b0;
+    assign wait_quiet = 1'b0;
     assign br_accepted = 1'b0;
     assign br_read_complete = 1'b0;
     assign br_rdata = 32'h0;
@@ -309,6 +338,9 @@ always_ff @(posedge clk) begin
         op_parts_r          <= 2'd0;
         op_part0_r          <= 32'h0;
         op_part1_r          <= 32'h0;
+        wait_hold_r         <= 1'b0;
+        wait_go_r           <= 1'b0;
+        wait_slow_r         <= 5'd0;
     end else begin
         if (direct_release) begin
             direct_active       <= 1'b0;
@@ -331,6 +363,23 @@ always_ff @(posedge clk) begin
 
         if (dcmd_pending_r && br_accepted)
             dcmd_pending_r <= 1'b0;
+
+        // The held WAIT word: done when the x87 is (go with nothing to
+        // report, else run untaken for the routine to report), or when it
+        // has worked 32 cycles in a row on something other than plain
+        // arithmetic (run untaken: the routine waits, taking interrupts).
+        if (wait_hold_r) begin
+            if (wait_quiet) begin
+                wait_hold_r <= 1'b0;
+                wait_go_r   <= error_n;
+            end else if (wait_slow_r == 5'd31) begin
+                wait_hold_r <= 1'b0;
+            end
+            wait_slow_r <= queue_short ? 5'd0 : wait_slow_r + 5'd1;
+        end
+        // Its RNI is that one word's.
+        if (store_exec)
+            wait_go_r <= 1'b0;
 
         st_commit_r <= 1'b0;
         x87_quiet_r <= x87_quiet && !dcmd_pending_r;
@@ -366,10 +415,10 @@ always_ff @(posedge clk) begin
         end
 
         if (direct_launch) begin
-            direct_active       <= ENABLE_X87 && direct_candidate && !l_reg &&
+            direct_active       <= ENABLE_X87 && esc_candidate && !l_reg &&
                                  !l_store && !l_status && !l_operand && direct_allowed &&
                                  queue_safe && !mask_load_pending;
-            op_taken_r          <= ENABLE_X87 && direct_candidate && l_operand &&
+            op_taken_r          <= ENABLE_X87 && esc_candidate && l_operand &&
                                  direct_allowed && queue_safe && !mask_load_pending;
             op_ctrl_r           <= l_fldcw;
             op_part_r           <= 1'b0;
@@ -380,27 +429,35 @@ always_ff @(posedge clk) begin
             // waited out: the command enters the bridge behind it.
             // A status read is taken as the overlays are, with no unmasked
             // exception pending; it then waits for the x87 to finish.
-            direct_st_r         <= ENABLE_X87 && direct_candidate && direct_allowed &&
+            direct_st_r         <= ENABLE_X87 && esc_candidate && direct_allowed &&
                                  error_n && (l_status ||
                                              (l_store && (busy_n || queue_safe) &&
                                               !dcmd_pending_r));
             st_status_r         <= l_status;
             st_control_r        <= l_esc == 3'd1;
-            st_state            <= (ENABLE_X87 && direct_candidate && direct_allowed &&
+            st_state            <= (ENABLE_X87 && esc_candidate && direct_allowed &&
                                     error_n && l_status) ? ST_READ : ST_IDLE;
             st_parts_r          <= l_parts;
             st_taken_r          <= 2'd0;
-            direct_reg_r        <= ENABLE_X87 && direct_candidate && l_regcmd &&
+            direct_reg_r        <= ENABLE_X87 && esc_candidate && l_regcmd &&
                                  direct_allowed && error_n && !dcmd_pending_r &&
                                  (((busy_n || queue_safe) && !posted_pending) ||
                                   (queue_safe && !mask_load_pending && queue_short));
-            dcmd_pending_r      <= ENABLE_X87 && direct_candidate && l_regcmd &&
+            dcmd_pending_r      <= ENABLE_X87 && esc_candidate && l_regcmd &&
                                  direct_allowed && error_n && !dcmd_pending_r &&
                                  (((busy_n || queue_safe) && !posted_pending) ||
                                   (queue_safe && !mask_load_pending && queue_short));
             direct_issued_r     <= 1'b0;
             direct_crossing_r   <= 1'b0;
             direct_data_valid_r <= 1'b0;
+            // WAIT: decided from what the x87 has in hand at the issue (a
+            // status read waits on the same, registered a cycle later): go
+            // when it is done with nothing pending, hold while it works;
+            // otherwise the word runs untaken into the original routine.
+            wait_go_r           <= wait_launch && wait_allowed &&
+                                   (wait_nop || (wait_quiet && error_n));
+            wait_hold_r         <= wait_launch && wait_allowed && !wait_nop && !wait_quiet;
+            wait_slow_r         <= 5'd0;
         end
 
         if (direct_mem_req && mem_accepted) begin
@@ -428,6 +485,8 @@ always_ff @(posedge clk) begin
             op_taken_r          <= 1'b0;
             op_part_r           <= 1'b0;
             op_post_r           <= 1'b0;
+            wait_hold_r         <= 1'b0;
+            wait_go_r           <= 1'b0;
         end
     end
 end

@@ -62,7 +62,8 @@ The generated 40-bit ROM image stores the D2 early kind in bits 39:37.
 | `x87-st-m16` | `544` | `A3A` | `X87_OVERLAY` | `A3A A3B A3C A3D A3E A3F` | ea, paging, x87-order |
 | `x87-fnstsw-ax` | `3DA` | `A40` | `X87_OVERLAY` | `A40 A41 A42 A43` | x87-order |
 | `x87-fnstsw-m16` | `3D9` | `A44` | `X87_OVERLAY` | `A44 A45 A46 A47 A48` | ea, paging, x87-order |
+| `x87-wait` | `3BD` | `A52` | `X87_OVERLAY` | `A52 A53` | x87-order |
 | `rmw-m-r-fast` | `04A` | `9CB` | `RMW_FAST` | `9CB 9CC 9CD` | ea, paging, store-order |
 | `rmw-unary-fast` | `04E` | `9CE` | `RMW_FAST` | `9CE 9CF 9D0` | ea, paging, store-order |
 
-Qualified overlays: 14.
+Qualified overlays: 15.

@@ -101,6 +101,7 @@ class OverlayQualifier(IntEnum):
     X87_REG = 4
     X87_ST_M32 = 5
     X87_MEM = 6
+    X87_WAIT = 7
 
 
 class RecipeAction(IntEnum):
@@ -139,6 +140,7 @@ class OverlayRecipe:
     commit: str
     hazards: tuple[str, ...] = ()
     retire_in_delay: bool = False
+    hardware_rni: bool = False    # the retirement word's RNI comes from the hardware
 
 
 PATCHES = [
@@ -524,6 +526,21 @@ PATCHES = [
     Patch(0xA48, "x87 FNSTSW/FNSTCW m16 overlay: RNI delay slot waits for the write",
           copy_from=0x047),
 
+    # WAIT (3BD: the protection test for CR0.MP and TS, then BUSY#/ERROR#
+    # polling that takes interrupts; 6 cycles with the x87 idle) is one word.
+    # x87_unit holds it in place (X87_STORE, as the status reads' store word)
+    # until the x87 has completed every command before it, status included,
+    # and then retires it with an RNI of its own when nothing is to be
+    # reported; otherwise the word runs as the overlays' fallback point and
+    # the original routine reports (#NM, #MF or FERR#) or waits out a long
+    # operation, taking interrupts. The word carries no ROM RNI, so that
+    # fallback is the usual first-word jump; the blank second word is its
+    # delay slot, or the RNI delay slot.
+    Patch(0xA52, "x87 WAIT overlay: held until the x87 is done; RNI from the hardware",
+          copy_from=0x030, fields=dict(dst=DEST_USTEP_X87_STORE)),
+    Patch(0xA53, "x87 WAIT overlay: fallback delay slot or RNI delay slot",
+          copy_from=0x030),
+
     # Cached RMW alternate entries. RD_FAST/WR_FAST are semantic actions owned
     # by the entry, while the ordinary fields keep ALU, flags, OPR_R/OPR_W and
     # RNI behavior in the microcode/data-unit path. Rejected RD_FAST probes
@@ -887,6 +904,10 @@ OVERLAY_RECIPES = [
                   (0xA44, 0xA45, 0xA46, 0xA47, 0xA48), OverlayQualifier.X87_MEM,
                   RecipeAction.X87_OVERLAY, "x87-direct-status",
                   ("ea", "paging", "x87-order"), True),
+    OverlayRecipe("x87-wait", 0x3BD, 0xA52, EarlyKind.NONE,
+                  (0xA52, 0xA53), OverlayQualifier.X87_WAIT,
+                  RecipeAction.X87_OVERLAY, "x87-direct-wait",
+                  ("x87-order",), True, True),
     OverlayRecipe("rmw-m-r-fast", 0x04A, 0x9CB, EarlyKind.RMW,
                   (0x9CB, 0x9CC, 0x9CD), OverlayQualifier.RMW_MEMORY,
                   RecipeAction.RMW_FAST, "store/flags",
@@ -1019,6 +1040,9 @@ def validate_recipes(words: list[int]) -> None:
                         f"recipe {recipe.name}: final target word 0x{path[-1]:03X} is not RNI"
                     )
 
+    # A blank word a patch writes on purpose (a plain delay slot) has the
+    # unused-word value too; only an unpatched target is an error.
+    patched = {p.addr for p in PATCHES}
     overlay_entries: set[int] = set()
     for recipe in OVERLAY_RECIPES:
         if recipe.entry in entries or recipe.entry in overlay_entries:
@@ -1030,10 +1054,15 @@ def validate_recipes(words: list[int]) -> None:
         if not 1 <= len(recipe.targets) <= 16 or recipe.targets[0] != recipe.entry:
             raise ValueError(f"overlay {recipe.name}: target must be 1..16 words from its entry")
         for addr in recipe.targets:
-            if not 0 <= addr < ROM_DEPTH or words[addr] == default_word:
+            if not 0 <= addr < ROM_DEPTH or (words[addr] == default_word and
+                                              addr not in patched):
                 raise ValueError(f"overlay {recipe.name}: invalid target word 0x{addr:03X}")
         rni_addr = recipe.targets[-2] if recipe.retire_in_delay else recipe.targets[-1]
-        if get_field(words[rni_addr], "op") != 0:
+        if recipe.hardware_rni:
+            # Its fallback jumps from the retirement word: no ROM RNI there.
+            if get_field(words[rni_addr], "op") == 0:
+                raise ValueError(f"overlay {recipe.name}: hardware-RNI word has a ROM RNI")
+        elif get_field(words[rni_addr], "op") != 0:
             raise ValueError(f"overlay {recipe.name}: retirement word is not RNI")
         overlay_entries.add(recipe.entry)
 
@@ -1119,6 +1148,8 @@ def render_recipe_svh(words: list[int]) -> str:
                    "((modrm[5:3] == 3'd0) || (modrm[5:3] == 3'd1))))"
         if recipe.qualifier == OverlayQualifier.RMW_MEMORY:
             return "modrm[7:6] != 2'b11"
+        if recipe.qualifier == OverlayQualifier.X87_WAIT:
+            return "opcode == 8'h9B"
         raise ValueError(f"overlay {recipe.name}: unhandled qualifier {recipe.qualifier}")
 
     lines = [
@@ -1472,7 +1503,8 @@ def render_recipe_svh(words: list[int]) -> str:
     ]
     for recipe in OVERLAY_RECIPES:
         if recipe.action == RecipeAction.X87_OVERLAY:
-            uses_ea = "1'b0" if recipe.qualifier == OverlayQualifier.X87_REG else "1'b1"
+            uses_ea = "1'b0" if recipe.qualifier in (OverlayQualifier.X87_REG,
+                                                     OverlayQualifier.X87_WAIT) else "1'b1"
             lines += [
                 f"            12'h{recipe.entry:03X}: begin",
                 "                // Direct x87 transport; normal sequencer retirement.",

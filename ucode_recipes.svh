@@ -69,6 +69,10 @@ function automatic logic [11:0] recipe_effective_entry(
             if (modrm[7:6] != 2'b11)
                 recipe_effective_entry = 12'hA44;
         end
+        12'h3BD: begin
+            if (opcode == 8'h9B)
+                recipe_effective_entry = 12'hA52;
+        end
         12'h04A: begin
             if (modrm[7:6] != 2'b11)
                 recipe_effective_entry = 12'h9CB;
@@ -99,6 +103,7 @@ function automatic logic [11:0] recipe_fallback_entry(input logic [11:0] entry);
         12'hA3A: recipe_fallback_entry = 12'h544;
         12'hA40: recipe_fallback_entry = 12'h3DA;
         12'hA44: recipe_fallback_entry = 12'h3D9;
+        12'hA52: recipe_fallback_entry = 12'h3BD;
         12'h9CB: recipe_fallback_entry = 12'h04A;
         12'h9CE: recipe_fallback_entry = 12'h04E;
         default: recipe_fallback_entry = entry;
@@ -119,6 +124,7 @@ function automatic logic [1:0] recipe_action(input logic [11:0] entry);
         12'hA3A: recipe_action = RECIPE_ACTION_X87_OVERLAY;
         12'hA40: recipe_action = RECIPE_ACTION_X87_OVERLAY;
         12'hA44: recipe_action = RECIPE_ACTION_X87_OVERLAY;
+        12'hA52: recipe_action = RECIPE_ACTION_X87_OVERLAY;
         12'h9CB: recipe_action = RECIPE_ACTION_RMW_FAST;
         12'h9CE: recipe_action = RECIPE_ACTION_RMW_FAST;
         12'h9C7: recipe_action = RECIPE_ACTION_INVLPG;
@@ -128,7 +134,7 @@ endfunction
 
 function automatic logic [2:0] recipe_early_kind(input logic [11:0] entry);
     unique case (entry)
-        12'h003, 12'h005, 12'h01D, 12'h01F, 12'h021, 12'h023, 12'h025, 12'h0F9, 12'h0FC, 12'h0FF, 12'h102, 12'h105, 12'h1E8, 12'h1F0, 12'h9C9, 12'h9D1: recipe_early_kind = RECIPE_EARLY_NONE;
+        12'h003, 12'h005, 12'h01D, 12'h01F, 12'h021, 12'h023, 12'h025, 12'h0F9, 12'h0FC, 12'h0FF, 12'h102, 12'h105, 12'h1E8, 12'h1F0, 12'h9C9, 12'h9D1, 12'hA52: recipe_early_kind = RECIPE_EARLY_NONE;
         12'h0B9: recipe_early_kind = RECIPE_EARLY_EA;
         12'h019, 12'h027, 12'h02C, 12'h031, 12'h035, 12'h1EB, 12'h1F3, 12'h9C5: recipe_early_kind = RECIPE_EARLY_LOAD;
         12'h013, 12'h015: recipe_early_kind = RECIPE_EARLY_STORE;
@@ -441,6 +447,10 @@ function automatic recipe_meta_t recipe_metadata(input dec_entry_t e);
             12'hA44: begin
                 // Direct x87 transport; normal sequencer retirement.
                 r.commit_sel = RECIPE_ACTION_X87_DIRECT; r.uses_ea = 1'b1;
+            end
+            12'hA52: begin
+                // Direct x87 transport; normal sequencer retirement.
+                r.commit_sel = RECIPE_ACTION_X87_DIRECT; r.uses_ea = 1'b0;
             end
             12'h9CB: begin
                 // Sequenced BRAM overlay; RD_FAST/WR_FAST own memory only.

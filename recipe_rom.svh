@@ -34,7 +34,7 @@ function automatic recipe_rom_t recipe_id_decode(
             r.meta.commit_sel = 3'd6;
             r.action = 2'd1;
         end
-        6'd8: begin  // 9D1
+        6'd8: begin  // 9D1 A52
             r.meta.commit_sel = 3'd6;
             r.early = 3'd1;
             r.action = 2'd1;

@@ -63,6 +63,7 @@ module microsequencer
     input  logic        jcc_fold_active,      // a folded Jcc supplies a synthetic RNI
     input  logic        branch_ustep_rni,     // a hardwired branch supplies a synthetic RNI
     input  logic        load_wb_retire,       // a direct-load hit supplies a synthetic RNI
+    input  logic        x87_wait_rni,         // a WAIT the x87 has finished: its word's RNI
     output logic        i_rni,                // the executing word ends the instruction
     output logic        i_rni_delay,          // the RNI delay slot is executing
     output logic        i_rni_delay_ea,       // low-fanout copy for the D2 EA bypass
@@ -124,7 +125,7 @@ wire rni_base = (((uc_opcode == 3'b000) || (uc_opcode == 3'b010)) &&
                  !jump_taken_prev) ||
                 ((uc_opcode == 3'b001) && jump_taken_prev);
 assign i_rni = rni_base || jcc_fold_active || branch_ustep_rni ||
-               load_wb_retire;
+               load_wb_retire || x87_wait_rni;
 
 seq_redirect_t exec_redirect;
 
