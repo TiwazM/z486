@@ -82,6 +82,7 @@ ROWS = [
     ("FPATAN (0.6/1.3)", x87("FPATAN", "1f3"), 218, 303, False),
     ("F2XM1 (0.4)", x87("F2XM1", "1f0"), 140, 279, True),
     ("FYL2X (1.3*log2 2.7)", x87("FYL2X", "1f1"), 196, 329, True),
+    ("FYL2XP1 (1.3*log2 1.2)", x87("FYL2XP1", "1f9"), 171, 326, True),
     ("FLDCW", homog("FLDCW"), 4, 4, False),
     ("FNSTCW", homog("FNSTCW"), 3, 3, False),
     ("FWAIT (x87 idle)", homog("FWAIT (x87 idle)"), 1, 3, True),

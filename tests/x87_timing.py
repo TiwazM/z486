@@ -91,6 +91,7 @@ data("S16", b"\0" * 2)
 data("S32", b"\0" * 4)
 data("S64", b"\0" * 8)
 data("S80", b"\0" * 10)
+data("V0_2", f64(0.2))
 
 
 def D(name):
@@ -204,6 +205,8 @@ T("F2XM1", [f"fld {m64('V0_4')}"], rep(["fld st(0)", "f2xm1", "fstp st(0)"], 1),
   focus=["f2xm1"], helpers=["fld st(0)", "fstp st(0)"])
 T("FYL2X", [f"fld {m64('V1_3')}", f"fld {m64('V2_7')}"], rep(["fld st(1)", "fld st(1)", "fyl2x", "fstp st(0)"], 1), n=16,
   focus=["fyl2x"], helpers=["fld st(0)", "fld st(0)", "fstp st(0)"])
+T("FYL2XP1", [f"fld {m64('V1_3')}", f"fld {m64('V0_2')}"], rep(["fld st(1)", "fld st(1)", "fyl2xp1", "fstp st(0)"], 1), n=16,
+  focus=["fyl2xp1"], helpers=["fld st(0)", "fld st(0)", "fstp st(0)"])
 
 # extra: value-stable FADD, isolated FILD, FWAIT, compiler-style sequences
 T("FADD/FSUB ST,ST(1) alternating (|dexp|<=1)", st1_a, rep(["fadd st, st(1)", "fsub st, st(1)"], 4), n=32)
