@@ -180,6 +180,7 @@ logic         memory_math_compare;
 logic         memory_math_subtract;
 logic         memory_math_reverse;
 logic         memory_math_pop;
+x87_reg_t     memory_math_st0;         // ST0 as the command dispatched (forwarded).
 logic         store_pending;           // ST0 conversion/transfer setup is pending.
 logic         store_integer;
 logic [1:0]   store_width;
@@ -516,6 +517,27 @@ function automatic logic m64_is_normal(input logic [63:0] raw);
     return (raw[62:52] != 11'h000) && (raw[62:52] != 11'h7ff);
 endfunction
 
+// A normal m32 or m64 operand as x87_from_m80 reads its extended form.
+function automatic x87_reg_t normal_m32_value(input logic [31:0] raw);
+    x87_reg_t value;
+    value = '0;
+    value.sign = raw[31];
+    value.exp = {7'h0, raw[30:23]} + 15'd16256;
+    value.sig = {1'b1, raw[22:0], 29'h0};
+    value.class_id = X87_NORMAL;
+    return value;
+endfunction
+
+function automatic x87_reg_t normal_m64_value(input logic [63:0] raw);
+    x87_reg_t value;
+    value = '0;
+    value.sign = raw[63];
+    value.exp = {4'h0, raw[62:52]} + 15'd15360;
+    value.sig = {1'b1, raw[51:0]};
+    value.class_id = X87_NORMAL;
+    return value;
+endfunction
+
 // A normal m64 extends exactly, as the executor's FLD_M64 conversion does it.
 function automatic logic [79:0] normal_m64_to_m80(input logic [63:0] raw);
     logic [14:0] extended_exp;
@@ -718,6 +740,50 @@ task automatic pop_value;
     begin
         pop_tags(2'd1);
         top <= top + 3'd1;
+    end
+endtask
+
+// Memory arithmetic: the operand meets ST0 as it was when the command
+// dispatched (nothing else writes the stack meanwhile).
+task automatic launch_memory_math(input x87_reg_t operand);
+    begin
+        memory_math_pending <= 1'b0;
+        if (stack_empty(st0_index)) begin
+            raise_stack_fault(1'b0);
+            if (memory_math_compare) begin
+                status_flags[14] <= 1'b1;
+                status_flags[10] <= 1'b1;
+                status_flags[8] <= 1'b1;
+            end
+            if (control_word[0]) begin
+                if (!memory_math_compare)
+                    write_stack(st0_index, x87_indefinite());
+                if (memory_math_pop)
+                    pop_value();
+            end
+        end else begin
+            command_complete_pulse <= 1'b0;
+            exec_plain <= 1'b1;
+            arith_compare <= memory_math_compare;
+            arith_quiet_compare <= 1'b0;
+            arith_write_result <= !memory_math_compare;
+            arith_pop_count <= {1'b0, memory_math_pop};
+            arith_dest_index <= st0_index;
+            arith_operand_a <= memory_math_reverse ? operand : memory_math_st0;
+            arith_operand_b <= memory_math_reverse ? memory_math_st0 : operand;
+            v2_exec_op <= memory_math_div
+                ? X87_ARITH_DIV
+                : memory_math_mul
+                ? X87_ARITH_MUL
+                : memory_math_compare
+                ? X87_ARITH_COMPARE
+                : memory_math_subtract ? X87_ARITH_SUB
+                                       : X87_ARITH_ADD;
+            v2_exec_owner <= EXEC_MATH;
+            v2_exec_size <= 2'd0;
+            v2_exec_transfer <= 64'h0;
+            v2_exec_pending <= 1'b1;
+        end
     end
 endtask
 
@@ -1355,6 +1421,7 @@ always_ff @(posedge clk) begin
         memory_math_subtract <= 1'b0;
         memory_math_reverse <= 1'b0;
         memory_math_pop <= 1'b0;
+        memory_math_st0 <= x87_empty();
         store_pending <= 1'b0;
         store_integer <= 1'b0;
         store_width <= 2'd0;
@@ -1470,45 +1537,7 @@ always_ff @(posedge clk) begin
         // cycles. PEREQ keeps the CPU stalled until this commit completes.
         if (push_pending) begin
             if (memory_math_pending) begin
-                memory_math_pending <= 1'b0;
-                if (stack_empty(st0_index)) begin
-                    raise_stack_fault(1'b0);
-                    if (memory_math_compare) begin
-                        status_flags[14] <= 1'b1;
-                        status_flags[10] <= 1'b1;
-                        status_flags[8] <= 1'b1;
-                    end
-                    if (control_word[0]) begin
-                        if (!memory_math_compare)
-                            write_stack(st0_index, x87_indefinite());
-                        if (memory_math_pop)
-                            pop_value();
-                    end
-                end else begin
-                    command_complete_pulse <= 1'b0;
-                    exec_plain <= 1'b1;
-                    arith_compare <= memory_math_compare;
-                    arith_quiet_compare <= 1'b0;
-                    arith_write_result <= !memory_math_compare;
-                    arith_pop_count <= {1'b0, memory_math_pop};
-                    arith_dest_index <= st0_index;
-                    arith_operand_a <= memory_math_reverse
-                                     ? push_pending_value : stack_read_data_a;
-                    arith_operand_b <= memory_math_reverse
-                                     ? stack_read_data_a : push_pending_value;
-                    v2_exec_op <= memory_math_div
-                        ? X87_ARITH_DIV
-                        : memory_math_mul
-                        ? X87_ARITH_MUL
-                        : memory_math_compare
-                        ? X87_ARITH_COMPARE
-                        : memory_math_subtract ? X87_ARITH_SUB
-                                               : X87_ARITH_ADD;
-                    v2_exec_owner <= EXEC_MATH;
-                    v2_exec_size <= 2'd0;
-                    v2_exec_transfer <= 64'h0;
-                    v2_exec_pending <= 1'b1;
-                end
+                launch_memory_math(push_pending_value);
             end else begin
                 push_raw_tagged(push_pending_raw, push_pending_tag);
             end
@@ -2837,6 +2866,7 @@ always_ff @(posedge clk) begin
 
                 X87_CMD_MEMORY_MATH: begin
                     memory_math_pending <= 1'b1;
+                    memory_math_st0 <= stack_read_data_a;
                     memory_math_mul <= command_decode.exec_op == X87_ARITH_MUL;
                     memory_math_div <= command_decode.exec_op == X87_ARITH_DIV;
                     memory_math_compare <= command_decode.compare;
@@ -2876,10 +2906,9 @@ always_ff @(posedge clk) begin
                             push_raw_tagged(normal_m32_to_m80(
                                 rx_payload_next[31:0]), 2'b00);
                         end else if (m32_is_normal(rx_payload_next[31:0])) begin
-                            push_pending_raw <= normal_m32_to_m80(
-                                rx_payload_next[31:0]);
-                            push_pending_tag <= 2'b00;
-                            push_pending <= 1'b1;
+                            // Memory arithmetic starts now.
+                            launch_memory_math(normal_m32_value(
+                                rx_payload_next[31:0]));
                         end else begin
                             v2_exec_op <= X87_CONVERT_FLD_M32;
                             v2_exec_owner <= EXEC_LOAD;
@@ -2899,10 +2928,8 @@ always_ff @(posedge clk) begin
                             push_raw_tagged(normal_m64_to_m80(
                                 rx_payload_next[63:0]), 2'b00);
                         end else if (m64_is_normal(rx_payload_next[63:0])) begin
-                            push_pending_raw <= normal_m64_to_m80(
-                                rx_payload_next[63:0]);
-                            push_pending_tag <= 2'b00;
-                            push_pending <= 1'b1;
+                            launch_memory_math(normal_m64_value(
+                                rx_payload_next[63:0]));
                         end else begin
                             v2_exec_op <= X87_CONVERT_FLD_M64;
                             v2_exec_owner <= EXEC_LOAD;
