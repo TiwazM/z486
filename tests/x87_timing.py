@@ -382,9 +382,14 @@ def parse_log(log):
 
 
 def x87_phase(cpu, unit, ctl, kinds):
-    """x87-side occupancy of one cycle, highest-priority first."""
+    """x87-side occupancy of one cycle, highest-priority first.
+
+    A command accepted behind a running operation (held) is charged from its
+    dispatch: until then its cycles belong to the operation it waits for."""
     rx = kinds >> 4
     tx = (kinds >> 2) & 3
+    held = (kinds >> 1) & 1
+    go = kinds & 1
     if bit(ctl, K_EXBUSY):
         return "exec"
     if bit(ctl, K_POLY) or bit(ctl, K_FPREM) or bit(ctl, K_FSCALE) or \
@@ -392,9 +397,13 @@ def x87_phase(cpu, unit, ctl, kinds):
         return "ctl_seq"          # control-level program between executor ops
     if bit(ctl, K_EXPEND):
         return "exec_launch"
+    if bit(ctl, K_CMDPEND) and go:
+        return "decode"           # dispatch (with the predecessor's RAM write)
     if bit(ctl, K_EXDONE) or bit(ctl, K_PUSH) or bit(ctl, K_RESW) or \
        bit(ctl, K_POP) or bit(ctl, K_STW):
         return "retire"
+    if bit(ctl, K_CMDPEND) and held:
+        return "held"             # held command re-reads its rows
     if bit(ctl, K_CMDPEND):
         return "decode"
     if rx != 0:
@@ -444,7 +453,7 @@ def body_fops(syms, code):
 
 
 X87_BUSY_PHASES = ("decode", "rx_wait", "ctl_operand", "exec_launch", "exec",
-                   "ctl_seq", "retire", "tx_wait")
+                   "ctl_seq", "retire", "tx_wait", "held")
 
 
 def analyse(log, syms, code):
@@ -492,7 +501,7 @@ def analyse(log, syms, code):
                 cpu_line[key][ph] += 1
         mean = lambda v: sum(v) / len(v) if v else 0.0
         loop_ovh = mean(per_line["dec"]) + mean(per_line["jnz"])
-        # x87 command segmentation (serialised commands; decode = command_pending)
+        # x87 command segmentation: a command starts at its dispatch (decode)
         seg_fop = []
         seg_ph = []
         seg_at = []
@@ -579,7 +588,8 @@ PHASE_GROUPS = {
     "cpu_gap": ("wait_idle",),
     "bridge_xfer": ("wait_bridge", "rx_wait", "tx_wait", "mid_bridge", "mid_idle",
                     "mid_direct_queue"),
-    "ctl_seq": ("decode", "ctl_operand", "exec_launch", "ctl_seq", "wait_direct_queue"),
+    "ctl_seq": ("decode", "ctl_operand", "exec_launch", "ctl_seq", "wait_direct_queue",
+                "held"),
     "exec": ("exec",),
     "retire": ("retire",),
 }

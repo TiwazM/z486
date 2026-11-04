@@ -102,7 +102,8 @@ if (ENABLE_X87) begin : gen_x87_timing_mon
     };
     wire [7:0] xm_kinds = {4'(dut.x87.gen_x87.control.rx_kind),
                            2'(dut.x87.gen_x87.control.tx_kind),
-                           2'b00};
+                           dut.x87.gen_x87.control.command_held,  // 1: accepted behind a running op
+                           dut.x87.gen_x87.control.command_go};   // 0: the command dispatches
 
     always @(posedge clk) begin
         if (xm_marker) begin
