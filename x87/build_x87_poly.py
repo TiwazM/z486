@@ -38,7 +38,8 @@ control logic (no executor operation).
 
 The script models every program exactly (53-bit round-to-nearest operations
 with an unbounded exponent, as the executor computes within its range),
-checks them against mpmath and fails if an error exceeds the limit.
+checks them against mpmath and fails if an error exceeds the limit, and can
+write instruction-level tests whose expected bit patterns come from the model.
 """
 
 from __future__ import annotations
@@ -741,12 +742,233 @@ def write_test(path: Path, count: int) -> None:
     path.write_text("\n".join(asm) + "\n")
 
 
+# m80 encodings for the F2XM1/FYL2X/FYL2XP1 tests.
+M80_POS_INF = 0x7FFF8000000000000000
+M80_INDEFINITE = 0xFFFFC000000000000000
+
+
+def m80(v) -> int:
+    """A value of at most 53 significant bits as an m80 bit pattern (normal or
+    denormal); "-0"/"+0" strings for signed zeros."""
+    if isinstance(v, str):
+        return {"+0": 0, "-0": 1 << 79, "+inf": M80_POS_INF, "-inf": M80_POS_INF | 1 << 79,
+                "indef": M80_INDEFINITE}[v]
+    v = MPF(v)
+    if v == 0:
+        return 0
+    s, sig, e = sig_exp(v)
+    if e < -16382:                                   # denormal: raw * 2^-16445
+        raw = MPF(abs(v)) * MPF(2) ** 16445
+        assert raw == int(raw) and raw < 2**63
+        return (s << 79) | int(raw)
+    assert e <= 16383
+    return (s << 79) | ((e + 16383) << 64) | (sig << 11)
+
+
+SW_C1, SW_C2, SW_PE, SW_UE, SW_ZE, SW_DE, SW_IE, SW_ES = 0x200, 0x400, 0x20, 0x10, 0x4, 0x2, 0x1, 0x80
+SW_CHECK = 0x3EFF            # exceptions, SF, ES, C1, C2, TOP (not C0/C3, B)
+LOGEXP_OPS = {"F2XM1": 0, "FYL2X": 1, "FYL2XP1": 2}
+
+
+def logexp_case(op: str, x, y=None, cw: int = 0x037F, de: bool = False):
+    """A program-computed case: (op, cw, y, x, depth, results, status)."""
+    if op == "F2XM1":
+        r, _, c1, pe = f2xm1(x)
+    elif op == "FYL2X":
+        r, _, c1, pe = fyl2x(y, x)
+    else:
+        r, _, c1, pe = fyl2xp1(y, x)
+    sw = (7 << 11) | (SW_C1 if c1 else 0) | (SW_PE if pe else 0) | (SW_DE if de else 0)
+    return (op, cw, y, x, [r], sw)
+
+
+def special_cases() -> list:
+    """F2XM1, FYL2X and FYL2XP1 on special operands, as Intel's SDM tables
+    give them (and this implementation's choices where Intel leaves the
+    result undefined), masked and unmasked: (op, cw, y, x, results, status).
+    An unmasked exception leaves the stack as it was (no pop)."""
+    qnan = 0x7FFFC000000001234000                 # +QNaN, a payload (above bit 10)
+    qnan2 = 0xFFFFC000000005678000                # -QNaN
+    snan = 0x7FFFA000000000000000                 # +SNaN (quieted: C000...)
+    snan_q = 0x7FFFE000000000000000
+    den = MPF(libmp.from_man_exp(0x123456789ABC, -16445 + 11))   # m80 denormal
+    one, two, three, half = MPF(1), MPF(2), MPF(3), MPF(0.5)
+    t7, t6 = 7 << 11, 6 << 11
+    IM, ZM, CW = 0x037E, 0x037B, 0x037F            # IE unmasked, ZE unmasked, all masked
+    c = []
+    # F2XM1 (masked): exact specials, out of range (ST0 unchanged, C2), flushed
+    # tiny results (UE, PE), the tiny path.
+    for x, r, sw in (("+0", "+0", 0), ("-0", "-0", 0), ("+inf", "+inf", 0), ("-inf", -one, 0),
+                     (qnan, qnan, 0), (snan, snan_q, SW_IE), (one, one, 0), (-one, -half, 0),
+                     (two, two, SW_C2), (MPF(-3.5), MPF(-3.5), SW_C2),
+                     (1 + MPF(2) ** -52, 1 + MPF(2) ** -52, SW_C2), ("-inf", -one, 0),
+                     (den, "+0", SW_DE | SW_UE | SW_PE), (-den, "-0", SW_DE | SW_UE | SW_PE),
+                     (MPF(2) ** -16382, "+0", SW_UE | SW_PE)):
+        c.append(("F2XM1", CW, None, x, [r], t7 | sw))
+    c.append(("F2XM1", IM, None, snan, [snan], t7 | SW_IE | SW_ES))
+    c.append(logexp_case("F2XM1", MPF(2) ** -16000 * 1.75))
+    c.append(logexp_case("F2XM1", -MPF(2) ** -61))
+    # FYL2X (masked): y in ST1, x in ST0; the result replaces ST1 and pops.
+    fy = [
+        (three, -two, "indef", SW_IE), (three, "-inf", "indef", SW_IE),
+        (three, "-0", "-inf", SW_ZE), (three, "+0", "-inf", SW_ZE), (-three, "+0", "+inf", SW_ZE),
+        ("+0", "+0", "indef", SW_IE), ("-0", "-0", "indef", SW_IE),
+        ("-inf", "+0", "+inf", 0), ("+inf", "-0", "-inf", 0),
+        (three, "+inf", "+inf", 0), (-three, "+inf", "-inf", 0),
+        ("+0", "+inf", "indef", SW_IE), ("-0", "+inf", "indef", SW_IE),
+        ("+inf", "+inf", "+inf", 0), ("-inf", "+inf", "-inf", 0),
+        (three, one, "+0", 0), (-three, one, "-0", 0), ("-0", one, "-0", 0), ("+0", one, "+0", 0),
+        ("+inf", one, "indef", SW_IE), ("-inf", one, "indef", SW_IE),
+        ("+inf", half, "-inf", 0), ("-inf", half, "+inf", 0), ("+inf", two, "+inf", 0),
+        ("-inf", two, "-inf", 0),
+        ("+0", two, "+0", 0), ("+0", half, "-0", 0), ("-0", half, "+0", 0), ("-0", two, "-0", 0),
+        (three, qnan, qnan, 0), (qnan2, three, qnan2, 0), (qnan2, qnan, qnan2, 0),
+        (snan, three, snan_q, SW_IE), (three, snan, snan_q, SW_IE), (snan, -two, snan_q, SW_IE),
+        (den, two, "+0", SW_DE | SW_UE | SW_PE), (den, half, "-0", SW_DE | SW_UE | SW_PE),
+        (-den, two, "-0", SW_DE | SW_UE | SW_PE),
+    ]
+    for y, x, r, sw in fy:
+        c.append(("FYL2X", CW, y, x, [r], t7 | sw))
+    # Unmasked: no write, no pop.
+    c.append(("FYL2X", IM, three, -two, [-two, three], t6 | SW_IE | SW_ES))
+    c.append(("FYL2X", IM, "+0", "+0", ["+0", "+0"], t6 | SW_IE | SW_ES))
+    c.append(("FYL2X", ZM, three, "+0", ["+0", three], t6 | SW_ZE | SW_ES))
+    c.append(("FYL2X", ZM, "+inf", "+0", ["-inf"], t7))            # no ZE for y = inf
+    # Exact powers of two: no PE when the product is exact.
+    c.append(logexp_case("FYL2X", MPF(8), three))
+    c.append(logexp_case("FYL2X", MPF(2), 1 + MPF(2) ** -52))
+    c.append(logexp_case("FYL2X", MPF(2) ** -16382, -MPF(0.75)))
+    c.append(logexp_case("FYL2X", den, MPF(1.5), de=True))
+    c.append(logexp_case("FYL2X", MPF(2) ** 16383 * 1.9, -three))
+    # FYL2XP1 (masked).
+    q = MPF(0.25)
+    fp = [
+        (three, "+0", "+0", 0), (three, "-0", "-0", 0), (-three, "+0", "-0", 0),
+        (-three, "-0", "+0", 0), ("+0", "-0", "-0", 0), ("-0", "-0", "+0", 0),
+        ("+inf", "+0", "indef", SW_IE), ("-inf", "-0", "indef", SW_IE),
+        ("+inf", q, "+inf", 0), ("+inf", -q, "-inf", 0), ("-inf", -q, "+inf", 0),
+        ("+0", q, "+0", 0), ("+0", -q, "-0", 0), ("-0", q, "-0", 0), ("-0", -q, "+0", 0),
+        (three, -one, "-inf", SW_ZE), (-three, -one, "+inf", SW_ZE), ("+0", -one, "indef", SW_IE),
+        ("+inf", -one, "-inf", 0), ("-inf", -one, "+inf", 0),
+        (three, -two, "indef", SW_IE), (three, "-inf", "indef", SW_IE),
+        (three, "+inf", "+inf", 0), (-three, "+inf", "-inf", 0), ("+0", "+inf", "indef", SW_IE),
+        (three, qnan, qnan, 0), (qnan2, q, qnan2, 0), (snan, q, snan_q, SW_IE),
+        (three, den, "+0", SW_DE | SW_UE | SW_PE), (-three, den, "-0", SW_DE | SW_UE | SW_PE),
+        (three, -den, "-0", SW_DE | SW_UE | SW_PE),
+        (den, q, "+0", SW_DE | SW_UE | SW_PE), (den, -q, "-0", SW_DE | SW_UE | SW_PE),
+    ]
+    for y, x, r, sw in fp:
+        c.append(("FYL2XP1", CW, y, x, [r], t7 | sw))
+    c.append(("FYL2XP1", IM, three, -two, [-two, three], t6 | SW_IE | SW_ES))
+    c.append(("FYL2XP1", ZM, three, -one, [-one, three], t6 | SW_ZE | SW_ES))
+    # Outside Intel's domain: FYL2X of 1 + x; exact when 1 + x is a power of two.
+    for x in (one, three, -half, half, MPF(100.5), MPF(-0.75), -one + MPF(2) ** -53,
+              MPF(2) ** 16000):
+        c.append(logexp_case("FYL2XP1", x, three))
+    c.append(logexp_case("FYL2XP1", MPF(2) ** -70 * 1.375, -three))
+    c.append(logexp_case("FYL2XP1", MPF(2) ** -16300, MPF(2) ** 100))
+    return c
+
+
+def write_logexp_tests(prog_dir: Path, count: int) -> None:
+    """tests/programs/x87_trans_logexp.asm: F2XM1, FYL2X and FYL2XP1 on random
+    and edge arguments (model results, C1 and PE) and on special operands
+    (results and flags, masked and unmasked). Operands and results are m80."""
+    rng = random.Random(4861)
+    cases = special_cases()
+    for i in range(count):
+        kind = i % 3
+        if kind == 0:
+            x = rand53(rng, -62, 0) if i % 2 else r53(rand53(rng, -40, -1) + rng.choice((-1, 1)) * 0.5)
+            if not 0 < abs(x) < 1:
+                x = MPF(0.375)
+            cases.append(logexp_case("F2XM1", x))
+        elif kind == 1:
+            y = rand53(rng, -40, 40)
+            j = i % 4
+            if j == 0:
+                x = rand53(rng, -16382, 16383, sign=False)
+            elif j == 1:
+                x = r53(1 + rand53(rng, -52, -2))
+            else:
+                x = rand53(rng, -10, 10, sign=False)
+            if x == 1:
+                x = MPF(3)
+            cases.append(logexp_case("FYL2X", x, y))
+        else:
+            y = rand53(rng, -40, 40)
+            x = rand53(rng, -64, -1.8)
+            cases.append(logexp_case("FYL2XP1", x, y))
+
+    asm = [
+        "; Generated by x87/build_x87_poly.py --test: F2XM1, FYL2X and FYL2XP1 on",
+        "; special operands (results and flags as Intel's tables give them, masked",
+        "; and unmasked) and on random and edge arguments (results, C1 and PE from",
+        "; the programs' emulation, which build_x87_poly.py checks against mpmath).",
+        "; Operands and results are m80. Each case: FNINIT, FLDCW, FLD y (FYL2X,",
+        "; FYL2XP1), FLD x, the operation, FNSTSW (exceptions, SF, ES, C1, C2 and",
+        "; TOP checked), FNCLEX, then the stack's values. Fail code (port E4): case",
+        "; index + 1 in the low word, the status word in the high word; then the",
+        "; value stored last (low dword, middle dword, high word).",
+        "", "BITS 16", "org 0", "",
+        "STATUS_PORT equ 0xE0", "DATA_PORT   equ 0xE4", "",
+        "start:", "    cli", "    mov ax, cs", "    mov ds, ax", "    mov es, ax", "    mov ss, ax",
+        "    mov sp, 0xfff0", "    cld",                  # above the case table
+        "    mov si, cases", "    xor bp, bp",
+        "next:", f"    cmp bp, {len(cases)}", "    je pass",
+        "    fninit", "    fldcw [si + 2]",
+        "    mov al, [si]",
+        "    cmp al, 0", "    je .one",
+        "    fld tword [si + 4]",
+        ".one:", "    fld tword [si + 14]",
+        "    cmp al, 1", "    je .fyl2x",
+        "    cmp al, 2", "    je .fyl2xp1",
+        "    f2xm1", "    jmp .done",
+        ".fyl2x:", "    fyl2x", "    jmp .done",
+        ".fyl2xp1:", "    fyl2xp1",
+        ".done:", "    fnstsw ax", "    mov [status], ax", "    fnclex",
+        "    and ax, 0x%04x" % SW_CHECK, "    cmp ax, [si + 44]", "    jne fail",
+        "    fstp tword [result]", "    lea di, [si + 24]", "    call compare", "    jne fail",
+        "    cmp byte [si + 1], 2", "    jne advance",
+        "    fstp tword [result]", "    lea di, [si + 34]", "    call compare", "    jne fail",
+        "advance:", "    add si, 46", "    inc bp", "    jmp next",
+        "compare:", "    push si", "    mov si, result", "    mov cx, 5", "    repe cmpsw",
+        "    pop si", "    ret",
+        "pass:", "    mov al, 1", "    out STATUS_PORT, al", "    hlt",
+        "fail:", "    mov ax, [status]", "    shl eax, 16", "    mov ax, bp", "    inc ax",
+        "    out DATA_PORT, eax",
+        "    mov eax, [result]", "    out DATA_PORT, eax", "    mov eax, [result + 4]",
+        "    out DATA_PORT, eax", "    mov ax, [result + 8]", "    out DATA_PORT, ax",
+        "    mov al, 0xff", "    out STATUS_PORT, al", "    hlt", "",
+        "align 2", "status: dw 0", "result: times 10 db 0", "align 2", "cases:",
+        "; op, depth, cw, y, x, result 0 (ST0), result 1 (ST1), status & %04xh" % SW_CHECK,
+    ]
+
+    def t80(v) -> str:
+        b = (m80(v) if not isinstance(v, int) else v).to_bytes(10, "little")
+        return ", ".join(f"0x{x:02x}" for x in b)
+
+    for op, cw, y, x, results, sw in cases:
+        y = "+0" if y is None else y
+        r0 = results[0]
+        r1 = results[1] if len(results) > 1 else "+0"
+        asm.append(f"    db {LOGEXP_OPS[op]}, {len(results)}")
+        asm.append(f"    dw 0x{cw:04x}")
+        asm.append(f"    db {t80(y)}")
+        asm.append(f"    db {t80(x)}")
+        asm.append(f"    db {t80(r0)}")
+        asm.append(f"    db {t80(r1)}")
+        asm.append(f"    dw 0x{sw & SW_CHECK:04x}")
+    (prog_dir / "x87_trans_logexp.asm").write_text("\n".join(asm) + "\n")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--samples", type=int, default=4000)
     ap.add_argument("--limit", type=float, default=1.1)
     ap.add_argument("--test", type=int, metavar="N", default=0,
-                    help="also write tests/programs/x87_trans_poly.asm with N cases")
+                    help="also write tests/programs/x87_trans_poly.asm with N cases and "
+                         "x87_trans_logexp.asm with the special cases and N more")
     args = ap.parse_args()
 
     print(f"program: {len(SINCOS)} sin/cos, {len(ATAN)} atan2, {len(EXP) + len(EXP_TINY)} 2^x-1, "
@@ -808,6 +1030,9 @@ def main() -> None:
         progs = root.parent / "tests" / "programs"
         write_test(progs / "x87_trans_poly.asm", args.test)
         print(f"wrote tests/programs/x87_trans_poly.asm ({args.test} cases)")
+        write_logexp_tests(progs, args.test)
+        print(f"wrote tests/programs/x87_trans_logexp.asm ({len(special_cases())} special, "
+              f"{args.test} more)")
 
 
 if __name__ == "__main__":
