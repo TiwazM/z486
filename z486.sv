@@ -3127,7 +3127,14 @@ x87_unit #(.ENABLE_X87(ENABLE_X87)) x87 (
     .direct_reg(i_bus.modrm[7:6] == 2'b11),
     .direct_store((i_bus.modrm[7:6] != 2'b11) && ((i_bus.opcode == 8'hD9) || (i_bus.opcode == 8'hDB)) &&
                   ((i_bus.modrm[5:3] == 3'd2) || (i_bus.modrm[5:3] == 3'd3))),
+    // The m16, m64 and m80 loads (DC-DF, and DB /5) read their operand with
+    // RD words (overlays x87-m16/m64/m80-load); the m32 loads use direct_mem_req.
+    .direct_operand((i_bus.modrm[7:6] != 2'b11) &&
+                    (i_bus.opcode[2] || ((i_bus.opcode[1:0] == 2'b11) &&
+                                         (i_bus.modrm[5:3] == 3'd5)))),
     .direct_data32(i_bus.data32),
+    .operand_part(uc_exec && (uc_dest == DEST_USTEP_X87_OPERAND)),
+    .operand_post(uc_exec && (uc_dest == DEST_USTEP_X87_POST)),
     .store_word(uc_active && (uc_dest == DEST_USTEP_X87_STORE)),
     .store_go(uc_active && (uc_dest == DEST_USTEP_X87_STORE) && !stall_mem),
     .store_opr_commit(x87_store_opr_commit),
@@ -3144,7 +3151,7 @@ x87_unit #(.ENABLE_X87(ENABLE_X87)) x87 (
     .mem_read_complete(mem_read_complete || (ucrd_hit && ucrd_x87_r)),
     .mem_servicing(mem_servicing),
     .mem_rdata((ucrd_hit && ucrd_x87_r) ? dcache_vipt_resolve_data : dcache_rdata),
-    .split_rdata(OPR_R),
+    .opr_r(OPR_R),
     .cancel(gp_fault_trigger || page_fault || interrupt_entry || q_flush),
     .busy_n(x87_busy_n),
     .pereq(x87_pereq),

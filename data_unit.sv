@@ -862,7 +862,8 @@ always_ff @(posedge clk) begin
             tmpf   <= {21'd0, instr.fop};
         end
         // The load routine's moves: CSOPCD = FOP << 16 | CS (502), FSVeIP
-        // (505), OPROFF = the operand offset (50C), TMPF (507).
+        // (505), OPROFF = the operand offset (50C), TMPF (507). IND has
+        // advanced past the first part of a multi-part operand.
         if (x87_load_commit) begin
             fsveip <= tmpeip;
             csopcd <= {5'd0, instr.fop, cs};

@@ -18,13 +18,16 @@ module x87_unit #(
     output logic        req_read_complete,
     output logic [31:0] req_rdata,
 
-    input  logic        direct_launch,      // Instruction issue checks the m32 overlay.
-    input  logic        direct_candidate,   // Recipe is an eligible m32 x87 form.
+    input  logic        direct_launch,      // Instruction issue checks the x87 overlays.
+    input  logic        direct_candidate,   // Recipe is an eligible direct x87 form.
     input  logic        direct_allowed,     // CR0 and runtime policy permit x87 use.
     input  logic [10:0] direct_fop,         // FOP of the executing instruction.
     input  logic        direct_reg,         // The issuing x87 form is a register form.
     input  logic        direct_store,       // ...an m32 store (FST/FSTP/FIST/FISTP m32).
+    input  logic        direct_operand,     // ...a load whose RD words hand in its operand.
     input  logic        direct_data32,      // ...in 32-bit operand size.
+    input  logic        operand_part,       // An X87_OPERAND word executed: OPR_R is next.
+    input  logic        operand_post,       // An X87_POST word executed: OPR_R is the last part.
     input  logic        store_word,         // The store overlay's command/read word is current.
     input  logic        store_go,           // ...and its destination check completed (no memory stall).
     output logic        store_opr_commit,   // The store result arrived: write OPR_R.
@@ -42,7 +45,7 @@ module x87_unit #(
     input  logic        mem_read_complete,
     input  logic        mem_servicing,
     input  logic [31:0] mem_rdata,
-    input  logic [31:0] split_rdata,
+    input  logic [31:0] opr_r,              // OPR_R: a split m32 read, an operand part.
     input  logic        cancel,             // Fault, interrupt, or frontend squash.
 
     output logic        busy_n,
@@ -58,7 +61,27 @@ logic        direct_issued_r;      // Demand read has crossed the paging handsha
 logic        direct_crossing_r;    // Dword spans two naturally aligned memory words.
 logic        direct_data_valid_r;  // Complete fault-checked operand is buffered.
 logic [31:0] direct_data_r;        // Buffered direct m32 operand.
-wire         direct_valid = direct_active && direct_data_valid_r;
+wire         m32_valid = direct_active && direct_data_valid_r;
+// Other loads (m16, m64, m80): the overlay's RD words read the operand and
+// the word after each DLY marks OPR_R as its next part. OPR_R is sampled the
+// cycle after the marker: no read of this instruction can write it sooner,
+// and a DLY may retire before its data is in OPR_R. X87_POST marks the last
+// part and posts FOP and operand from the cycle after; the overlay holds the
+// instruction until the x87 accepts them. Parts are dwords, except the m16
+// operand and the m80 tail, which are words: one part (m16) or three (m80)
+// end in two bytes.
+logic        op_taken_r;           // The issued x87 overlay reads its operand in microcode.
+logic        op_part_r;            // Sample OPR_R as the next part now.
+logic        op_post_r;            // Post the load with OPR_R as its last part.
+logic  [1:0] op_parts_r;           // Parts sampled before the last.
+logic [31:0] op_part0_r, op_part1_r;
+wire         direct_valid = m32_valid || op_post_r;
+wire  [1:0]  direct_words = op_post_r ? op_parts_r + 2'd1 : 2'd1;
+wire         direct_tail16 = op_post_r && (op_parts_r != 2'd1);
+wire  [79:0] direct_data = !op_post_r ? {48'h0, direct_data_r} :
+                           (op_parts_r == 2'd0) ? {48'h0, opr_r} :
+                           (op_parts_r == 2'd1) ? {16'h0, opr_r, op_part0_r} :
+                                                  {opr_r[15:0], op_part1_r, op_part0_r};
 // Register forms: the FOP is posted to the bridge as a command write, in the
 // executing instruction's first cycle. Taken only when the 386 routine would
 // post it at once: CR0 allows x87 use, no unmasked exception is pending, the
@@ -82,14 +105,14 @@ logic        st_read_issued_r;     // The bridge accepted the result read.
 wire         dcmd_sel = dcmd_pending_r || st_cmd || st_read_req;
 wire         own_cmd = dcmd_pending_r || st_cmd;     // a command write (F8)
 wire         own_read = st_read_req && !st_read_issued_r;
-assign direct_taken = direct_active || direct_reg_r || direct_st_r;
+assign direct_taken = direct_active || direct_reg_r || direct_st_r || op_taken_r;
 assign direct_reg_taken = direct_reg_r;
 wire         direct_release = direct_valid && direct_ready;
 assign load_commit = direct_release;
 
 assign direct_mem_req = direct_active && !direct_issued_r && !direct_data_valid_r;
 assign store_hold = direct_st_r && store_word && (st_state != ST_DONE);
-assign direct_stall = (direct_active && !direct_release) || store_hold;
+assign direct_stall = ((direct_active || op_post_r) && !direct_release) || store_hold;
 
 generate
 if (ENABLE_X87) begin : gen_x87
@@ -144,8 +167,9 @@ if (ENABLE_X87) begin : gen_x87
     x87_control control (
         .clk(clk), .reset(!reset_n),
         .cmd_valid(cmd_valid), .cmd_fop(cmd_fop), .cmd_ready(cmd_ready),
-        .direct_m32_valid(direct_valid), .direct_m32_fop(direct_fop),
-        .direct_m32_data(direct_data_r), .direct_m32_ready(direct_ready),
+        .direct_valid(direct_valid), .direct_fop(direct_fop),
+        .direct_data(direct_data), .direct_words(direct_words),
+        .direct_tail16(direct_tail16), .direct_ready(direct_ready),
         .word_in_valid(word_in_valid), .word_in_be(word_in_be),
         .word_in_data(word_in_data), .word_in_ready(word_in_ready),
         .read_req_valid(read_req_valid),
@@ -190,11 +214,30 @@ always_ff @(posedge clk) begin
         direct_crossing_r   <= 1'b0;
         direct_data_valid_r <= 1'b0;
         direct_data_r       <= 32'h0;
+        op_taken_r          <= 1'b0;
+        op_part_r           <= 1'b0;
+        op_post_r           <= 1'b0;
+        op_parts_r          <= 2'd0;
+        op_part0_r          <= 32'h0;
+        op_part1_r          <= 32'h0;
     end else begin
         if (direct_release) begin
             direct_active       <= 1'b0;
             direct_issued_r     <= 1'b0;
             direct_data_valid_r <= 1'b0;
+            op_taken_r          <= 1'b0;
+            op_post_r           <= 1'b0;
+        end
+
+        op_part_r <= op_taken_r && operand_part;
+        if (op_taken_r && operand_post)
+            op_post_r <= 1'b1;
+        if (op_part_r) begin
+            if (op_parts_r == 2'd0)
+                op_part0_r <= opr_r;
+            else
+                op_part1_r <= opr_r;
+            op_parts_r <= op_parts_r + 2'd1;
         end
 
         if (dcmd_pending_r && br_accepted)
@@ -215,8 +258,14 @@ always_ff @(posedge clk) begin
 
         if (direct_launch) begin
             direct_active       <= ENABLE_X87 && direct_candidate && !direct_reg &&
-                                 !direct_store && direct_allowed && queue_safe &&
-                                 !mask_load_pending;
+                                 !direct_store && !direct_operand && direct_allowed &&
+                                 queue_safe && !mask_load_pending;
+            op_taken_r          <= ENABLE_X87 && direct_candidate && direct_operand &&
+                                 !direct_reg && !direct_store && direct_allowed &&
+                                 queue_safe && !mask_load_pending;
+            op_part_r           <= 1'b0;
+            op_post_r           <= 1'b0;
+            op_parts_r          <= 2'd0;
             direct_st_r         <= ENABLE_X87 && direct_candidate && direct_store && direct_data32 &&
                                  direct_allowed && error_n && (busy_n || queue_safe) &&
                                  !posted_pending && !dcmd_pending_r && (st_state == ST_IDLE);
@@ -240,7 +289,7 @@ always_ff @(posedge clk) begin
             direct_data_r       <= mem_rdata;
             direct_data_valid_r <= 1'b1;
         end else if (direct_issued_r && direct_crossing_r && !mem_servicing) begin
-            direct_data_r       <= split_rdata;
+            direct_data_r       <= opr_r;
             direct_data_valid_r <= 1'b1;
         end
 
@@ -253,6 +302,9 @@ always_ff @(posedge clk) begin
             direct_active       <= 1'b0;
             direct_issued_r     <= 1'b0;
             direct_data_valid_r <= 1'b0;
+            op_taken_r          <= 1'b0;
+            op_part_r           <= 1'b0;
+            op_post_r           <= 1'b0;
         end
     end
 end

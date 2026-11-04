@@ -69,7 +69,7 @@ if (ENABLE_X87) begin : gen_x87_timing_mon
         dut.x87.gen_x87.control.busy_n,              // 28
         dut.x87.gen_x87.control.pereq,               // 27
         dut.x87.gen_x87.control.command_pending,     // 26
-        dut.x87.gen_x87.control.direct_m32_pending,  // 25
+        dut.x87.gen_x87.control.direct_pending,  // 25
         dut.x87.gen_x87.control.v2_exec_pending,     // 24
         dut.x87.gen_x87.control.v2_exec_busy,        // 23
         dut.x87.gen_x87.control.v2_exec_done,        // 22

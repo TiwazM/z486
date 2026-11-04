@@ -880,6 +880,8 @@ localparam DEST_USTEP_TASK_CS = 7'h6E;  // Task load establishes full CS selecto
 localparam DEST_USTEP_FAULT_DONE = 7'h6F; // Fault delivery completion marker
 localparam DEST_USTEP_INVLPG = 7'h70;    // 486 single-page TLB invalidation
 localparam DEST_USTEP_X87_STORE = 7'h71; // x87 store overlay: command + result read into OPR_R
+localparam DEST_USTEP_X87_OPERAND = 7'h72; // x87 load overlay: OPR_R is the next operand part
+localparam DEST_USTEP_X87_POST = 7'h73;  // x87 load overlay: OPR_R is the last part; post the load
 localparam DEST_LATTTF = 7'h78;  // Faulting linear address (page fault)
 localparam DEST_PFERRC = 7'h7A;  // Page fault error code
 localparam DEST_PDBR = 7'h7B;    // Page directory base register (CR3) for LPCR reads
@@ -1070,7 +1072,7 @@ localparam BUSOP_IACK = 6'h28;        // IACK - Interrupt acknowledge bus cycle
 // Microcode ROM words. The extracted 80386 CROM fills 000-9FF. Words the
 // optimizer adds past 9FF (scripts/ucode_optimize.py) grow the ROM in 512-word
 // steps, two M10Ks each.
-localparam int UCODE_ROM_DEPTH = 2560;
+localparam int UCODE_ROM_DEPTH = 3072;
 
 localparam [11:0] UADDR_GENERAL_FAULT1 = 12'h85B;  // #GP(0) - sets SIGMA=4, error code=0
 localparam [11:0] UADDR_STACK_FAULT    = 12'h863;  // #SS(0) - sets SIGMA=3, error code=0

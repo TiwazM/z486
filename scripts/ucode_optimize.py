@@ -21,7 +21,7 @@ from enum import IntEnum
 from pathlib import Path
 
 BASE_DEPTH = 2560          # Extracted 80386 CROM words (000-9FF).
-ROM_DEPTH = 2560          # ROM words; grow in 512-word steps (UCODE_ROM_DEPTH too)
+ROM_DEPTH = 3072          # ROM words; grow in 512-word steps (UCODE_ROM_DEPTH too)
                           # when optimizer-owned words go past 9FF.
 UCODE_BITS = 37
 ROM_BITS = 40
@@ -32,6 +32,8 @@ DEST_USTEP_TASK_CS = 0x6E  # Optimizer-owned: task load establishes CS RPL.
 DEST_USTEP_FAULT_DONE = 0x6F # Optimizer-owned: fault delivery completion.
 DEST_USTEP_INVLPG = 0x70   # Optimizer-owned: invalidate one TLB page.
 DEST_USTEP_X87_STORE = 0x71 # Optimizer-owned: x87 store command and result read.
+DEST_USTEP_X87_OPERAND = 0x72 # Optimizer-owned: OPR_R is the next x87 operand part.
+DEST_USTEP_X87_POST = 0x73  # Optimizer-owned: OPR_R is the last part; post the load.
 DEST_USTEP_ALU = 0x7E       # Optimizer-owned: commit this word's ALU result to DSTREG.
 DEST_USTEP_BSWAP = 0x7C     # Optimizer-owned: byte-swap SRCREG into itself.
 ALUJMP_JDESCA = 0x20        # Optimizer-owned: jump if descriptor A bit is set.
@@ -42,6 +44,12 @@ ALUJMP_PASS = 0x14
 SRC_USTEP_SEG_INDEX = 0x3A  # Optimizer-owned: decoded segment as legacy IRF selector.
 SRC_FOP = 0x3B              # Architectural x87 ESC/ModR/M command.
 SRC_MDTMP = 0x1D            # Multiplier low product / quotient.
+SRC_OPR_R = 0x2D            # Memory read data.
+BUS_RD = 0x16               # Memory read (operand size).
+BUS_IND_PLUS = 0x1F         # IND += ALU source.
+ALUSRC_CONST_4 = 0x33
+ALUJMP_BITS16 = 0x25        # Operand size 16 for the rest of the instruction.
+ALUJMP_BITS32 = 0x27        # Operand size 32 for the rest of the instruction.
 
 # field name -> (shift, width)
 FIELDS = {
@@ -89,6 +97,7 @@ class OverlayQualifier(IntEnum):
     RMW_UNARY = 3
     X87_REG = 4
     X87_ST_M32 = 5
+    X87_MEM_LOAD = 6
 
 
 class RecipeAction(IntEnum):
@@ -257,6 +266,41 @@ PATCHES = [
           copy_from=0x20E),
     Patch(0x9C6, "x87 m32 direct-load overlay: retire after x87 queue accepts operand",
           copy_from=0x20F),
+
+    # The m64 loads (4DB: DC arithmetic, DD /0 FLD, DF /5 FILD) read their
+    # operand with ordinary RD words, as the 386 loop at 506-50B does, but
+    # without its coprocessor port writes: the word after each DLY hands
+    # OPR_R to the x87 unit (X87_OPERAND), and X87_POST hands the last part
+    # and posts FOP and operand together. Each RD is limit-checked and
+    # translated on its own, so a fault in any part restarts the instruction
+    # before the x87 has seen anything. The parts are read as BITS32 RDs with
+    # IND += 4 between them. The first word is the fallback point and BITS32
+    # is its only work: the original routine sets the operand size before it
+    # uses it, so the fallback stays clean, and the blank second word is its
+    # jump delay slot. The x87 unit holds the instruction from the cycle after
+    # X87_POST until the x87 accepts the operand, so the blank word after
+    # X87_POST may be skipped while it waits.
+    Patch(0xA00, "x87 m64 load overlay: fallback point, dword operand parts",
+          copy_from=0x030, fields=dict(aluop=ALUJMP_BITS32)),
+    Patch(0xA01, "x87 m64 load overlay: fallback delay slot",
+          copy_from=0x20E),
+    Patch(0xA02, "x87 m64 load overlay: RD part 0",
+          copy_from=0x030, fields=dict(bus=BUS_RD)),
+    Patch(0xA03, "x87 m64 load overlay: DLY, IND += 4",
+          copy_from=0x030, fields=dict(sub=0, bus=BUS_IND_PLUS, alusrc=ALUSRC_CONST_4)),
+    Patch(0xA04, "x87 m64 load overlay: RD part 1, part 0 to the x87 unit",
+          copy_from=0x030, fields=dict(bus=BUS_RD, src=SRC_OPR_R,
+                                       dst=DEST_USTEP_X87_OPERAND)),
+    Patch(0xA05, "x87 m64 load overlay: DLY",
+          copy_from=0x20E),
+    Patch(0xA06, "x87 m64 load overlay: part 1 to the x87 unit, post the load",
+          copy_from=0x030, fields=dict(src=SRC_OPR_R, dst=DEST_USTEP_X87_POST)),
+    Patch(0xA07, "x87 m64 load overlay: wait for the x87 to accept the load",
+          copy_from=0x20E),
+    Patch(0xA08, "x87 m64 load overlay: retire",
+          copy_from=0x20F),
+    Patch(0xA09, "x87 m64 load overlay: RNI delay slot",
+          copy_from=0x20E),
 
     # Register-form FP instructions (4C1) post their FOP straight to the
     # integrated x87; hardware records FIP/FCS/FOP (the 4CE/4CF/4D0 moves) when
@@ -596,6 +640,11 @@ OVERLAY_RECIPES = [
                   (0x9C5, 0x9C6), OverlayQualifier.X87_M32_FLOAT,
                   RecipeAction.X87_OVERLAY, "x87-direct-m32",
                   ("ea", "paging", "x87-order")),
+    OverlayRecipe("x87-m64-load", 0x4DB, 0xA00, EarlyKind.SEQ,
+                  (0xA00, 0xA01, 0xA02, 0xA03, 0xA04, 0xA05, 0xA06, 0xA07,
+                   0xA08, 0xA09), OverlayQualifier.X87_MEM_LOAD,
+                  RecipeAction.X87_OVERLAY, "x87-direct-operand",
+                  ("ea", "paging", "x87-order"), True),
     OverlayRecipe("x87-reg", 0x4C1, 0x9D1, EarlyKind.NONE,
                   (0x9D1, 0x9D2), OverlayQualifier.X87_REG,
                   RecipeAction.X87_OVERLAY, "x87-direct-reg",
@@ -744,8 +793,8 @@ def validate_recipes(words: list[int]) -> None:
             raise ValueError(f"overlay {recipe.name}: source and overlay entries match")
         if recipe.action == RecipeAction.NONE:
             raise ValueError(f"overlay {recipe.name}: invalid action {recipe.action}")
-        if not 1 <= len(recipe.targets) <= 6 or recipe.targets[0] != recipe.entry:
-            raise ValueError(f"overlay {recipe.name}: target must be 1..6 words from its entry")
+        if not 1 <= len(recipe.targets) <= 12 or recipe.targets[0] != recipe.entry:
+            raise ValueError(f"overlay {recipe.name}: target must be 1..12 words from its entry")
         for addr in recipe.targets:
             if not 0 <= addr < ROM_DEPTH or words[addr] == default_word:
                 raise ValueError(f"overlay {recipe.name}: invalid target word 0x{addr:03X}")
@@ -821,6 +870,8 @@ def render_recipe_svh(words: list[int]) -> str:
     def overlay_qualifier_expr(recipe: OverlayRecipe) -> str:
         if recipe.qualifier == OverlayQualifier.X87_M32_FLOAT:
             return "(opcode == 8'hD8) || ((opcode == 8'hD9) && (modrm[5:3] == 3'd0))"
+        if recipe.qualifier == OverlayQualifier.X87_MEM_LOAD:
+            return "modrm[7:6] != 2'b11"
         if recipe.qualifier == OverlayQualifier.X87_REG:
             return "modrm[7:6] == 2'b11"
         if recipe.qualifier == OverlayQualifier.X87_ST_M32:

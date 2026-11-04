@@ -14,10 +14,12 @@ module x87_control
     input  logic [10:0] cmd_fop,                // Encoded ESC opcode and ModR/M.
     output logic        cmd_ready,              // Core can accept cmd_fop now.
 
-    input  logic        direct_m32_valid,       // Direct path posts a fault-checked m32 operand.
-    input  logic [10:0] direct_m32_fop,         // Memory-form FOP for direct_m32_data.
-    input  logic [31:0] direct_m32_data,        // Operand returned by demand memory.
-    output logic        direct_m32_ready,       // One-entry direct command queue is available.
+    input  logic        direct_valid,           // Direct path posts a fault-checked memory operand.
+    input  logic [10:0] direct_fop,             // Memory-form FOP for direct_data.
+    input  logic [79:0] direct_data,            // Operand, low part first, one dword per fragment.
+    input  logic  [1:0] direct_words,           // Fragments: 1 (m16/m32), 2 (m64), 3 (m80).
+    input  logic        direct_tail16,          // The last fragment holds two bytes.
+    output logic        direct_ready,           // One-entry direct command queue is available.
 
     input  logic        word_in_valid,          // Operand-transfer word is valid.
     input  logic  [3:0] word_in_be,             // Valid bytes in word_in_data.
@@ -92,9 +94,13 @@ logic [10:0] command_fop;              // FOP retained through dispatch and stat
 x87_command_decode_t command_decode;   // Synchronous generated command descriptor.
 x87_command_decode_t command_decode_rom;
 x87_exec_op_t        v2_exec_op_port;  // Executor operation as presented to the port.
-logic        direct_m32_pending;       // One direct FOP/data pair waiting for dispatch.
-logic [10:0] direct_m32_fop_r;
-logic [31:0] direct_m32_data_r;
+logic        direct_pending;           // One direct FOP/operand pair waiting for dispatch.
+logic [10:0] direct_fop_r;
+logic [79:0] direct_data_r;
+logic  [1:0] direct_words_r;
+logic        direct_tail16_r;
+logic  [1:0] direct_tail_words;        // Fragments still to enter the transfer queue.
+logic [47:0] direct_tail_data;         // ...low fragment first.
 
 logic [2:0] stack_addr_a;              // Retained physical stack address for port A.
 logic [2:0] stack_addr_b;              // Retained physical stack address for port B.
@@ -743,9 +749,9 @@ endtask
 // RPTI may replay a memory command after the x87 has accepted it but before
 // the CPU transfers the first operand word. Re-arming that exact empty receive
 // transaction is idempotent; unrelated commands remain blocked.
-wire core_cmd_direct = direct_m32_pending;
+wire core_cmd_direct = direct_pending;
 wire core_cmd_valid = core_cmd_direct || cmd_valid;
-wire [10:0] core_cmd_fop = core_cmd_direct ? direct_m32_fop_r : cmd_fop;
+wire [10:0] core_cmd_fop = core_cmd_direct ? direct_fop_r : cmd_fop;
 wire restartable_rx_command = !core_cmd_direct && (rx_kind != RX_NONE) &&
                               (tx_kind == TX_NONE) &&
                               (transfer_count == 2'd0) &&
@@ -768,9 +774,11 @@ wire core_cmd_ready = ((rx_kind == RX_NONE) || restartable_rx_command) &&
                    !read_resp_valid;
 // Direct memory commands remain ordered ahead of later bridge commands. Only
 // masked-exception mode permits capture while a predecessor is still active.
-assign direct_m32_ready = !direct_m32_pending && !cmd_valid && queue_safe;
-assign cmd_ready = !direct_m32_pending && core_cmd_ready;
-assign word_in_ready = (rx_kind != RX_NONE) && transfer_push_ready;
+assign direct_ready = !direct_pending && !cmd_valid && queue_safe;
+assign cmd_ready = !direct_pending && core_cmd_ready;
+// A direct operand's later fragments own the transfer queue's input.
+assign word_in_ready = (rx_kind != RX_NONE) && (direct_tail_words == 2'd0) &&
+                       transfer_push_ready;
 assign read_req_ready = !read_resp_valid &&
                         (!read_req_data_port ||
                          ((tx_kind != TX_NONE) && transfer_pop_valid));
@@ -788,6 +796,10 @@ wire [2:0] fsave_pair_row = top + ((tx_index == 5'd11) ? 3'd2 :
                                    (tx_index == 5'd21) ? 3'd6 : 3'd0);
 // synthesis translate_off
 always_ff @(posedge clk) begin
+    if (!reset && core_cmd_valid && core_cmd_ready && (direct_tail_words != 2'd0))
+        $error("x87 command accepted while a direct operand is still entering the queue");
+    if (!reset && (direct_tail_words != 2'd0) && !transfer_push_ready)
+        $error("x87 direct operand fragment found the transfer queue full");
     if (!reset && transfer_pop_valid && (rx_kind != RX_NONE) &&
         (rx_kind != RX_ENV) && (rx_kind != RX_STATE) &&
         (rx_byte_count[0] ||
@@ -836,7 +848,7 @@ assign busy_n = !(((v2_exec_owner == EXEC_MATH) &&
 // a one-cycle completion pulse can precede the CPU's CORWAIT sample.
 assign pereq = (rx_kind != RX_NONE) || poly_active ||
                ((tx_kind != TX_NONE) && transfer_pop_valid) ||
-               direct_m32_pending || command_pending ||
+               direct_pending || command_pending ||
                stack_write_a || stack_write_b ||
                push_pending || memory_math_pending ||
                store_pending || bcd_convert_pending || bcd_load_pending ||
@@ -888,9 +900,18 @@ always_comb begin
         default: ;
     endcase
 
+    // A direct operand enters the queue low fragment first, from the cycle
+    // its command is accepted: the queue is empty then and holds all three
+    // fragments of an m80. A two-byte last fragment has its bytes in the low
+    // lanes, as the 80386 sends an m80 tail.
     if (core_cmd_direct && core_cmd_valid && core_cmd_ready) begin
         transfer_push_valid = 1'b1;
-        transfer_push_data = {4'hf, direct_m32_data_r};
+        transfer_push_data = {((direct_words_r == 2'd1) && direct_tail16_r) ? 4'h3 : 4'hf,
+                              direct_data_r[31:0]};
+    end else if (direct_tail_words != 2'd0) begin
+        transfer_push_valid = 1'b1;
+        transfer_push_data = {((direct_tail_words == 2'd1) && direct_tail16_r) ? 4'h3 : 4'hf,
+                              direct_tail_data[31:0]};
     end else begin
         transfer_push_valid = (rx_kind != RX_NONE)
                             ? word_in_valid : tx_produce_valid;
@@ -1101,9 +1122,13 @@ always_ff @(posedge clk) begin
         last_fop <= 11'h000;
         command_pending <= 1'b0;
         command_fop <= 11'h000;
-        direct_m32_pending <= 1'b0;
-        direct_m32_fop_r <= 11'h000;
-        direct_m32_data_r <= 32'h0;
+        direct_pending <= 1'b0;
+        direct_fop_r <= 11'h000;
+        direct_data_r <= 80'h0;
+        direct_words_r <= 2'd1;
+        direct_tail16_r <= 1'b0;
+        direct_tail_words <= 2'd0;
+        direct_tail_data <= 48'h0;
         stack_addr_a <= 3'd0;
         stack_addr_b <= 3'd1;
         stack_write_a <= 1'b0;
@@ -1229,10 +1254,16 @@ always_ff @(posedge clk) begin
         stack_write_b <= 1'b0;
         pereq_release_hold <= {1'b0, pereq_release_hold[1]};
 
-        if (direct_m32_valid && direct_m32_ready) begin
-            direct_m32_pending <= 1'b1;
-            direct_m32_fop_r <= direct_m32_fop;
-            direct_m32_data_r <= direct_m32_data;
+        if (direct_valid && direct_ready) begin
+            direct_pending <= 1'b1;
+            direct_fop_r <= direct_fop;
+            direct_data_r <= direct_data;
+            direct_words_r <= direct_words;
+            direct_tail16_r <= direct_tail16;
+        end
+        if ((direct_tail_words != 2'd0) && transfer_push_ready) begin
+            direct_tail_words <= direct_tail_words - 2'd1;
+            direct_tail_data <= {32'h0, direct_tail_data[47:32]};
         end
 
         // Transfer conversion and TOP-dependent stack selection are separate
@@ -1905,8 +1936,11 @@ always_ff @(posedge clk) begin
                              (core_cmd_fop == 11'h1f9) ||   // FYL2XP1
                              (core_cmd_fop == 11'h1fd))     // FSCALE
                           ? top + 3'd1 : top + core_cmd_fop[2:0];
-            if (core_cmd_direct)
-                direct_m32_pending <= 1'b0;
+            if (core_cmd_direct) begin
+                direct_pending <= 1'b0;
+                direct_tail_words <= direct_words_r - 2'd1;
+                direct_tail_data <= direct_data_r[79:32];
+            end
         end
 
         if (word_in_valid && word_in_ready)

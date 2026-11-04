@@ -546,7 +546,7 @@ module tb_protected_mode #(
                             cpu_x87_wait_reason[5] += 1;
                         if (dut.x87.gen_x87.control.executor.busy)
                             cpu_x87_wait_reason[6] += 1;
-                        if (dut.x87.gen_x87.control.direct_m32_pending)
+                        if (dut.x87.gen_x87.control.direct_pending)
                             cpu_x87_wait_reason[7] += 1;
                     end
                 end
