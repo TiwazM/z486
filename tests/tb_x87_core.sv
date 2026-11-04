@@ -7,6 +7,7 @@ logic reset = 1'b1;
 logic cmd_valid = 1'b0;
 logic [10:0] cmd_fop = '0;
 logic cmd_ready;
+logic quiet;
 logic word_in_valid = 1'b0;
 logic [3:0] word_in_be = '0;
 logic [31:0] word_in_data = '0;
@@ -27,6 +28,7 @@ always #5 clk = ~clk;
 x87_control dut (
     .clk(clk), .reset(reset),
     .cmd_valid(cmd_valid), .cmd_fop(cmd_fop), .cmd_ready(cmd_ready),
+    .quiet(quiet),
     .direct_valid(1'b0), .direct_fop(11'h000),
     .direct_data(80'h0), .direct_words(2'd1), .direct_tail16(1'b0),
     .direct_ready(),
@@ -54,8 +56,9 @@ endtask
 
 task automatic wait_command_complete;
     begin
-        // Advance past command acceptance before observing ready again.
-        do @(posedge clk); while (!cmd_ready);
+        // Advance past command acceptance before observing quiet: control
+        // may accept the next command (cmd_ready) before this one is done.
+        do @(posedge clk); while (!quiet);
         @(negedge clk);
     end
 endtask

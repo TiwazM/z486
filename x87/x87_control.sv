@@ -12,7 +12,10 @@ module x87_control
 
     input  logic        cmd_valid,              // CPU presents an x87 command.
     input  logic [10:0] cmd_fop,                // Encoded ESC opcode and ModR/M.
-    output logic        cmd_ready,              // Core can accept cmd_fop now.
+    output logic        cmd_ready,              // Core can accept cmd_fop now (perhaps
+                                                // to hold it behind a running operation).
+    output logic        quiet,                  // Every accepted command has completed,
+                                                // status word included; none is held.
 
     input  logic        direct_valid,           // Direct path posts a fault-checked memory operand.
     input  logic [10:0] direct_fop,             // Memory-form FOP for direct_data.
@@ -118,8 +121,22 @@ logic       stack_write_a;
 logic       stack_write_b;
 logic [79:0] stack_write_data_a;
 logic [79:0] stack_write_data_b;
-logic [79:0] stack_read_raw_a;
-logic [79:0] stack_read_raw_b;
+logic [79:0] stack_read_raw_a;         // Stack RAM outputs, with a held command's
+logic [79:0] stack_read_raw_b;         // forwarded row (below).
+logic [79:0] stack_ram_q_a;
+logic [79:0] stack_ram_q_b;
+// A command may be accepted while a plain executor operation (register or
+// memory arithmetic, a compare, FSQRT, FRNDINT) runs, with every exception
+// masked. It reads its stack rows at acceptance, relative to TOP after that
+// operation's pops, and is held (command_pending, command_held) until the
+// operation has retired; then it dispatches in the cycle its result is written
+// to the RAM, taking that row from the write (it read the row before).
+logic        exec_plain;               // A plain executor operation runs (cleared at done).
+logic        command_held;             // The pending command was accepted behind it.
+logic  [2:0] command_row_a;            // Rows the pending command read at acceptance.
+logic  [2:0] command_row_b;
+logic        command_rows_fresh;       // The RAM outputs are still those reads: the ports
+                                       // kept those rows last cycle and wrote nothing.
 x87_reg_t    stack_read_data_a;
 x87_reg_t    stack_read_data_b;
 
@@ -318,6 +335,12 @@ assign debug_state = {
     v2_exec_done, v2_exec_pending, v2_exec_owner,
     v2_exec_uaddr, last_fop, rx_kind, (tx_kind != TX_NONE)
 };
+// A held command dispatches while the stack RAM writes its predecessor's
+// result (port A); a row it reads from that write comes from the write data.
+wire forward_a = command_held && stack_write_a && (stack_addr_a == command_row_a);
+wire forward_b = command_held && stack_write_a && (stack_addr_a == command_row_b);
+assign stack_read_raw_a = forward_a ? stack_write_data_a : stack_ram_q_a;
+assign stack_read_raw_b = forward_b ? stack_write_data_a : stack_ram_q_b;
 assign stack_read_data_a = x87_from_m80(stack_read_raw_a);
 assign stack_read_data_b = x87_from_m80(stack_read_raw_b);
 assign push_pending_value = x87_from_m80(push_pending_raw);
@@ -765,7 +788,7 @@ wire restartable_rx_command = !core_cmd_direct && (rx_kind != RX_NONE) &&
                               (tx_kind == TX_NONE) &&
                               (transfer_count == 2'd0) &&
                               (core_cmd_fop == last_fop);
-wire core_cmd_ready = ((rx_kind == RX_NONE) || restartable_rx_command) &&
+wire core_cmd_idle = ((rx_kind == RX_NONE) || restartable_rx_command) &&
                    (tx_kind == TX_NONE) &&
                    (transfer_count == 2'd0) &&
                    !command_pending && !stack_write_a && !stack_write_b &&
@@ -781,10 +804,45 @@ wire core_cmd_ready = ((rx_kind == RX_NONE) || restartable_rx_command) &&
                    (fscale_phase == FSCALE_IDLE) &&
                    (logexp_phase == LOGEXP_IDLE) && !poly_active &&
                    !read_resp_valid;
+// Taken behind a running plain operation: register forms but the status
+// reads (DF E0-FF), which need the finished status, and direct memory loads
+// and arithmetic, whose operand enters the empty transfer queue. Bridge
+// memory forms (stores, the original routines' transfers) wait as before.
+wire core_cmd_holdable = core_cmd_direct ||
+                         ((core_cmd_fop[7:6] == 2'b11) &&
+                          !((core_cmd_fop[10:8] == 3'd7) && core_cmd_fop[5]));
+// With every exception masked the running operation cannot raise one, so it
+// retires as decoded: its result, its pops. Not in its completing cycle,
+// whose stack write owns the port addresses.
+wire core_cmd_behind = exec_plain && !v2_exec_done && queue_safe &&
+                       !command_pending && !stack_write_a && !stack_write_b &&
+                       (rx_kind == RX_NONE) && (tx_kind == TX_NONE) &&
+                       (transfer_count == 2'd0) && (direct_tail_words == 2'd0) &&
+                       !read_resp_valid && core_cmd_holdable;
+wire core_cmd_ready = core_cmd_idle || core_cmd_behind;
+// TOP the accepted command sees: after the running operation's pops.
+wire [2:0] accept_top = top + (exec_plain ? {1'b0, arith_pop_count} : 3'd0);
+wire [2:0] accept_row_b = ((fop_decode_key(core_cmd_fop) == 11'h530) ||
+                           (core_cmd_fop == 11'h1f1) ||   // FYL2X
+                           (core_cmd_fop == 11'h1f3) ||   // FPATAN
+                           (core_cmd_fop == 11'h1f5) ||   // FPREM1
+                           (core_cmd_fop == 11'h1f8) ||   // FPREM
+                           (core_cmd_fop == 11'h1f9) ||   // FYL2XP1
+                           (core_cmd_fop == 11'h1fd))     // FSCALE
+                        ? accept_top + 3'd1 : accept_top + core_cmd_fop[2:0];
+// A held command dispatches once its predecessor has retired (a stack RAM
+// write may still be in flight: forwarded) and its reads are current;
+// otherwise it reads its rows again first.
+wire held_retired = !v2_exec_pending && !v2_exec_busy && !v2_exec_done &&
+                    !result_write_pending && !push_pending && !pop_pending &&
+                    !stack_write_b;
+wire command_go = command_pending &&
+                  (!command_held || (held_retired && command_rows_fresh));
 // Direct memory commands remain ordered ahead of later bridge commands. Only
 // masked-exception mode permits capture while a predecessor is still active.
 assign direct_ready = !direct_pending && !cmd_valid && queue_safe;
 assign cmd_ready = !direct_pending && core_cmd_ready;
+assign quiet = !direct_pending && core_cmd_idle;
 // A direct operand's later fragments own the transfer queue's input.
 assign word_in_ready = (rx_kind != RX_NONE) && (direct_tail_words == 2'd0) &&
                        transfer_push_ready;
@@ -957,7 +1015,7 @@ assign tx_consume_fire = (tx_kind != TX_NONE) &&
 // command-dispatch datapath without adding a protocol cycle.
 x87_command_rom command_rom (
     .clk(clk),
-    .address(core_cmd_fop),
+    .address(command_pending ? command_fop : core_cmd_fop),
     .decode(command_decode_rom)
 );
 
@@ -1019,15 +1077,8 @@ always_comb begin
     stack_port_addr_a = stack_addr_a;
     stack_port_addr_b = stack_addr_b;
     if (core_cmd_valid && core_cmd_ready) begin
-        stack_port_addr_a = top;
-        stack_port_addr_b = ((fop_decode_key(core_cmd_fop) == 11'h530) ||
-                             (core_cmd_fop == 11'h1f1) ||   // FYL2X
-                             (core_cmd_fop == 11'h1f3) ||   // FPATAN
-                             (core_cmd_fop == 11'h1f5) ||   // FPREM1
-                             (core_cmd_fop == 11'h1f8) ||   // FPREM
-                             (core_cmd_fop == 11'h1f9) ||   // FYL2XP1
-                             (core_cmd_fop == 11'h1fd))     // FSCALE
-                          ? top + 3'd1 : top + core_cmd_fop[2:0];
+        stack_port_addr_a = accept_top;
+        stack_port_addr_b = accept_row_b;
     end
 end
 
@@ -1036,11 +1087,11 @@ x87_stack_mem stack_mem (
     .addr_a(stack_port_addr_a),
     .write_a(stack_write_a),
     .write_data_a(stack_write_data_a),
-    .read_data_a(stack_read_raw_a),
+    .read_data_a(stack_ram_q_a),
     .addr_b(stack_port_addr_b),
     .write_b(stack_write_b),
     .write_data_b(stack_write_data_b),
-    .read_data_b(stack_read_raw_b)
+    .read_data_b(stack_ram_q_b)
 );
 
 x87_logexp_rom logexp_rom (
@@ -1145,6 +1196,11 @@ always_ff @(posedge clk) begin
         last_fop <= 11'h000;
         command_pending <= 1'b0;
         command_fop <= 11'h000;
+        exec_plain <= 1'b0;
+        command_held <= 1'b0;
+        command_row_a <= 3'd0;
+        command_row_b <= 3'd1;
+        command_rows_fresh <= 1'b0;
         direct_pending <= 1'b0;
         direct_fop_r <= 11'h000;
         direct_data_r <= 80'h0;
@@ -1310,6 +1366,7 @@ always_ff @(posedge clk) begin
                     end
                 end else begin
                     command_complete_pulse <= 1'b0;
+                    exec_plain <= 1'b1;
                     arith_compare <= memory_math_compare;
                     arith_quiet_compare <= 1'b0;
                     arith_write_result <= !memory_math_compare;
@@ -1374,6 +1431,9 @@ always_ff @(posedge clk) begin
         if (v2_exec_start) begin
             v2_exec_pending <= 1'b0;
         end
+
+        if (v2_exec_done)
+            exec_plain <= 1'b0;
 
         if (v2_exec_done) begin
             case (v2_exec_commit)
@@ -1967,16 +2027,12 @@ always_ff @(posedge clk) begin
             last_fop <= core_cmd_fop;
             command_fop <= core_cmd_fop;
             command_pending <= 1'b1;
+            command_held <= !core_cmd_idle;
             masked_cw_load_r <= core_cmd_direct && (direct_data_r[5:0] == 6'h3f);
-            stack_addr_a <= top;
-            stack_addr_b <= ((fop_decode_key(core_cmd_fop) == 11'h530) ||
-                             (core_cmd_fop == 11'h1f1) ||   // FYL2X
-                             (core_cmd_fop == 11'h1f3) ||   // FPATAN
-                             (core_cmd_fop == 11'h1f5) ||   // FPREM1
-                             (core_cmd_fop == 11'h1f8) ||   // FPREM
-                             (core_cmd_fop == 11'h1f9) ||   // FYL2XP1
-                             (core_cmd_fop == 11'h1fd))     // FSCALE
-                          ? top + 3'd1 : top + core_cmd_fop[2:0];
+            stack_addr_a <= accept_top;
+            stack_addr_b <= accept_row_b;
+            command_row_a <= accept_top;
+            command_row_b <= accept_row_b;
             if (core_cmd_direct) begin
                 direct_pending <= 1'b0;
                 direct_tail_words <= direct_words_r - 2'd1;
@@ -1984,16 +2040,33 @@ always_ff @(posedge clk) begin
             end
         end
 
+        command_rows_fresh <= (core_cmd_valid && core_cmd_ready) ||
+                              ((stack_addr_a == command_row_a) &&
+                               (stack_addr_b == command_row_b) &&
+                               !stack_write_a && !stack_write_b);
+
         if (word_in_valid && word_in_ready)
             // Keep PEREQ visible through the CPU microcode branch that
             // observes completion, even though the arithmetic side may drain
             // this queued word independently.
             pereq_release_hold <= 2'b11;
 
+        // A held command whose RAM outputs went stale (the ports moved on
+        // without its dispatch) reads its rows again.
+        if (command_pending && command_held && held_retired &&
+            !command_rows_fresh) begin
+            stack_addr_a <= command_row_a;
+            stack_addr_b <= command_row_b;
+        end
+
         // Stack operands are synchronous RAM outputs captured from the command
         // acceptance cycle. Execute only after both ports have returned.
-        if (command_pending) begin
+        if (command_go) begin
             command_pending <= 1'b0;
+            command_held <= 1'b0;
+            // Later stages (memory arithmetic's ST0) read these rows again.
+            stack_addr_a <= command_row_a;
+            stack_addr_b <= command_row_b;
             command_complete_pulse <= 1'b1;
             status_read_pending <= command_decode.status_pending;
             rx_kind <= RX_NONE;
@@ -2123,6 +2196,7 @@ always_ff @(posedge clk) begin
                         end
                     end else begin
                         command_complete_pulse <= 1'b0;
+                        exec_plain <= 1'b1;
                         arith_compare <= 1'b0;
                         arith_write_result <= 1'b1;
                         arith_pop_count <= 2'd0;
@@ -2374,6 +2448,7 @@ always_ff @(posedge clk) begin
                         end
                     end else begin
                         command_complete_pulse <= 1'b0;
+                        exec_plain <= 1'b1;
                         arith_compare <= 1'b0;
                         arith_write_result <= 1'b1;
                         arith_pop_count <= 2'd0;
@@ -2504,6 +2579,7 @@ always_ff @(posedge clk) begin
                         end
                     end else begin
                         command_complete_pulse <= 1'b0;
+                        exec_plain <= 1'b1;
                         v2_exec_op <= command_decode.exec_op;
                         v2_exec_owner <= EXEC_MATH;
                         v2_exec_size <= 2'd0;

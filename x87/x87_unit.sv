@@ -173,6 +173,7 @@ if (ENABLE_X87) begin : gen_x87
     wire        cmd_valid;
     wire [10:0] cmd_fop;
     wire        cmd_ready;
+    wire        ctl_quiet;
     wire        word_in_valid;
     wire  [3:0] word_in_be;
     wire [31:0] word_in_data;
@@ -189,8 +190,9 @@ if (ENABLE_X87) begin : gen_x87
     // command, so the coprocessor-wait microcode samples a settled protocol.
     assign busy_n = ctl_busy_n && !posted_pending;
     assign pereq  = ctl_pereq || posted_pending;
-    // control takes a command only when every earlier one has completed.
-    assign x87_quiet = cmd_ready && !cmd_valid && !posted_pending;
+    // control may take a command behind a running one: quiet is its own
+    // report that every accepted command has completed, status included.
+    assign x87_quiet = ctl_quiet && !cmd_valid && !posted_pending;
 
     // The direct command has the bridge to itself: no ESC routine (the only
     // source of paging's x87 cycles) runs while it waits. Paging sees neither
@@ -221,6 +223,7 @@ if (ENABLE_X87) begin : gen_x87
     x87_control control (
         .clk(clk), .reset(!reset_n),
         .cmd_valid(cmd_valid), .cmd_fop(cmd_fop), .cmd_ready(cmd_ready),
+        .quiet(ctl_quiet),
         .direct_valid(direct_valid), .direct_fop(direct_fop),
         .direct_data(direct_data), .direct_words(direct_words),
         .direct_tail16(direct_tail16), .direct_ready(direct_ready),
