@@ -351,6 +351,10 @@ wire math_denormal_operand = v2_exec_math_done &&
                               trans_denormal_operand;
 wire math_range_incomplete = trans_done &&
                              v2_exec_range_incomplete;
+// The math destination is a row the same instruction pops.
+wire arith_pop_row_written =
+    ((arith_pop_count != 2'd0) && (arith_dest_index == top)) ||
+    ((arith_pop_count == 2'd2) && (arith_dest_index == top + 3'd1));
 wire math_unmasked_exception =
     (math_invalid && !control_word[0]) ||
     (math_denormal_operand && !control_word[1]) ||
@@ -643,12 +647,9 @@ task automatic schedule_push(input x87_reg_t value);
     end
 endtask
 
-task automatic schedule_push_raw(input logic [79:0] value);
+task automatic push_const_raw(input logic [79:0] value);
     begin
-        push_pending_raw <= value;
-        push_pending_tag <= stack_tag_from_m80(value);
-        push_pending <= 1'b1;
-        command_complete_pulse <= 1'b0;
+        push_raw_tagged(value, stack_tag_from_m80(value));
     end
 endtask
 
@@ -1392,9 +1393,16 @@ always_ff @(posedge clk) begin
                             loaded.sign = 1'b1;   // FBLD of -0 loads -0
                             bcd_load_negate <= 1'b0;
                         end
-                        push_pending_raw <= x87_to_m80(loaded);
-                        push_pending_tag <= x87_tag(loaded);
-                        push_pending <= 1'b1;
+                        if (memory_math_pending) begin
+                            // A converted memory operand: the push stage
+                            // pairs it with ST0 next cycle.
+                            push_pending_raw <= x87_to_m80(loaded);
+                            push_pending_tag <= x87_tag(loaded);
+                            push_pending <= 1'b1;
+                        end else begin
+                            // A load pushes as it completes.
+                            push_raw_tagged(x87_to_m80(loaded), x87_tag(loaded));
+                        end
                     end
                     if (v2_exec_invalid)
                         raise_invalid();
@@ -1932,11 +1940,20 @@ always_ff @(posedge clk) begin
             // A masked invalid operation retires its indefinite/quiet-NaN
             // result and compare pop. An unmasked invalid leaves the stack.
             if (!math_unmasked_exception && !math_range_incomplete) begin
+                // The result goes to the stack RAM in the next cycle, which
+                // holds PEREQ (stack_write_a) as the result write did. A
+                // destination this instruction also pops (FADDP ST(0),ST)
+                // is written the cycle after the pop, as it always was, so
+                // its tag reads as the result's.
                 if (arith_write_result &&
                     (v2_exec_commit == X87_COMMIT_REPLACE_ST0)) begin
-                    result_write_index <= arith_dest_index;
-                    result_write_raw <= x87_to_m80(math_result);
-                    result_write_pending <= 1'b1;
+                    if (arith_pop_row_written) begin
+                        result_write_index <= arith_dest_index;
+                        result_write_raw <= x87_to_m80(math_result);
+                        result_write_pending <= 1'b1;
+                    end else begin
+                        write_stack_raw(arith_dest_index, x87_to_m80(math_result));
+                    end
                     command_complete_pulse <= 1'b0;
                 end
                 if (arith_pop_count != 0) begin
@@ -2010,10 +2027,8 @@ always_ff @(posedge clk) begin
                                 command_complete_pulse <= 1'b0;
                             end
                     end else begin
-                        result_write_index <= st0_index;
-                        result_write_raw <= {
-                            !stack_read_raw_a[79], stack_read_raw_a[78:0]};
-                        result_write_pending <= 1'b1;
+                        write_stack_raw(st0_index, {
+                            !stack_read_raw_a[79], stack_read_raw_a[78:0]});
                         command_complete_pulse <= 1'b0;
                     end
                 end
@@ -2028,9 +2043,7 @@ always_ff @(posedge clk) begin
                                 command_complete_pulse <= 1'b0;
                             end
                     end else begin
-                        result_write_index <= st0_index;
-                        result_write_raw <= {1'b0, stack_read_raw_a[78:0]};
-                        result_write_pending <= 1'b1;
+                        write_stack_raw(st0_index, {1'b0, stack_read_raw_a[78:0]});
                         command_complete_pulse <= 1'b0;
                     end
                 end
@@ -2072,29 +2085,31 @@ always_ff @(posedge clk) begin
                     endcase
                 end
                 X87_CMD_PUSH_CONST: begin
+                    // Pushed at dispatch; the stack write holds PEREQ.
+                    command_complete_pulse <= 1'b0;
                     case (command_decode.argument)
-                        4'd0: schedule_push(x87_one());       // FLD1
-                        4'd1: schedule_push_raw(              // FLDL2T
+                        4'd0: push_value(x87_one());          // FLD1
+                        4'd1: push_const_raw(                 // FLDL2T
                             control_word[11:10] == 2'b10
                                 ? 80'h4000_d49a784bcd1b8aff
                                 : 80'h4000_d49a784bcd1b8afe);
-                        4'd2: schedule_push_raw(              // FLDL2E
+                        4'd2: push_const_raw(                 // FLDL2E
                             !control_word[10]
                                 ? 80'h3fff_b8aa3b295c17f0bc
                                 : 80'h3fff_b8aa3b295c17f0bb);
-                        4'd3: schedule_push_raw(              // FLDPI
+                        4'd3: push_const_raw(                 // FLDPI
                             !control_word[10]
                                 ? 80'h4000_c90fdaa22168c235
                                 : 80'h4000_c90fdaa22168c234);
-                        4'd4: schedule_push_raw(              // FLDLG2
+                        4'd4: push_const_raw(                 // FLDLG2
                             !control_word[10]
                                 ? 80'h3ffd_9a209a84fbcff799
                                 : 80'h3ffd_9a209a84fbcff798);
-                        4'd5: schedule_push_raw(              // FLDLN2
+                        4'd5: push_const_raw(                 // FLDLN2
                             !control_word[10]
                                 ? 80'h3ffe_b17217f7d1cf79ac
                                 : 80'h3ffe_b17217f7d1cf79ab);
-                        default: schedule_push(x87_zero(1'b0)); // FLDZ
+                        default: push_value(x87_zero(1'b0));  // FLDZ
                     endcase
                 end
                 X87_CMD_FSQRT: begin
@@ -2612,7 +2627,12 @@ always_ff @(posedge clk) begin
                 end
                 RX_M32: begin
                     if (rx_byte_count_next >= 4'd4) begin
-                        if (m32_is_normal(rx_payload_next[31:0])) begin
+                        if (m32_is_normal(rx_payload_next[31:0]) &&
+                            !memory_math_pending) begin
+                            // FLD m32 of a normal value pushes now.
+                            push_raw_tagged(normal_m32_to_m80(
+                                rx_payload_next[31:0]), 2'b00);
+                        end else if (m32_is_normal(rx_payload_next[31:0])) begin
                             push_pending_raw <= normal_m32_to_m80(
                                 rx_payload_next[31:0]);
                             push_pending_tag <= 2'b00;
@@ -2649,9 +2669,15 @@ always_ff @(posedge clk) begin
                 end
                 RX_M80: begin
                     if (rx_byte_count_next >= 4'd10) begin
-                        push_pending_raw <= rx_payload_next;
-                        push_pending_tag <= stack_tag_from_m80(rx_payload_next);
-                        push_pending <= 1'b1;
+                        if (memory_math_pending) begin
+                            push_pending_raw <= rx_payload_next;
+                            push_pending_tag <= stack_tag_from_m80(rx_payload_next);
+                            push_pending <= 1'b1;
+                        end else begin
+                            // FLD m80 pushes now.
+                            push_raw_tagged(rx_payload_next,
+                                            stack_tag_from_m80(rx_payload_next));
+                        end
                         rx_kind <= RX_NONE;
                     end
                 end
