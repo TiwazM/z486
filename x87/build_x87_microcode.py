@@ -62,6 +62,7 @@ PREPARE = {
     "MUL": 7,
     "DIV": 8,
     "SQRT": 9,
+    "SCALE": 10,
 }
 
 CLASSIFY = {
@@ -73,6 +74,7 @@ CLASSIFY = {
     "MUL": 5,
     "DIVSQRT": 6,
     "TRANS": 7,
+    "SCALE": 8,
 }
 
 ENGINE = {
@@ -87,6 +89,7 @@ ENGINE = {
 PACK = {
     "HOLD": 0,
     "PACK_ROUNDINT": 1,
+    "PACK_SCALE": 2,
     "PACK_FIST": 5,
     "FIST_INVALID": 6,
     "ROUND_PACK_FST": 7,
@@ -175,6 +178,18 @@ PROGRAM: list[ProgramItem] = [
     (None, UOp(flow="FINISH", pack="PACK_ROUNDINT", destination="RESULT",
                commit="REPLACE_ST0")),
     ("round_commit", UOp(flow="FINISH", src_a="RESULT", commit="REPLACE_ST0")),
+
+    # FSCALE: ST0 * 2^trunc(ST1). The classification takes Intel's special
+    # cases, trunc(|ST1|) (saturated) and ST0's leading zeros; SCALE
+    # normalizes ST0 and adds the exponents; a result below the normal range
+    # is shifted down by ROUND_SPLIT and rounded by the pack, which also
+    # gives the overflow response.
+    ("entry_fscale", UOp(src_a="OPERAND_A", src_b="OPERAND_B", classify="SCALE")),
+    (None, UOp(flow="BRANCH", target="round_commit", condition="DIRECT_READY",
+               prepare="SCALE")),
+    (None, UOp(prepare="ROUND_SPLIT")),
+    (None, UOp(flow="FINISH", pack="PACK_SCALE", destination="RESULT",
+               commit="REPLACE_ST0")),
 
     ("entry_fld_m32", UOp(prepare="FLD", destination="WORK")),
     (None, UOp(flow="BRANCH", target="fld_commit", condition="DIRECT_READY")),

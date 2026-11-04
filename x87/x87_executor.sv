@@ -1,8 +1,8 @@
 //
 // x87 Executor
 // Add, multiply and divide/square root datapaths with shared rounding; FRNDINT
-// by masks; transcendental operands are classified here and computed by
-// x87_control's programs
+// and FSCALE by masks; transcendental operands are classified here and
+// computed by x87_control's programs
 //
 module x87_executor
     import x87_pkg::*, x87_ucode_pkg::*;
@@ -18,6 +18,8 @@ module x87_executor
     input  logic                 trans_cosine,       // Select cosine instead of sine.
     input  logic                 trans_atan2,        // Select two-operand arctangent.
     input  logic           [1:0] trans_logexp,       // X87_TRANS_F2XM1/FYL2X/FYL2XP1.
+    input  logic           [1:0] range_masks,        // {UM, OM}: FSCALE's underflow and
+                                                     // overflow masks (control word 4:3).
     input  x87_reg_t             operand,            // Primary numeric operand.
     input  x87_reg_t             operand_b,          // Secondary numeric operand.
     input  logic          [63:0] transfer_in,        // Raw load/conversion input bits.
@@ -128,25 +130,40 @@ logic divsqrt_iterate;
 logic divsqrt_next_bit;
 logic [1:0] sqrt_next_pair;         // Radicand bits for the next remainder.
 logic divsqrt_remainder_nonzero;
-// FRNDINT rounds at the point the exponent gives, without a shift loop and
-// off the shared work register and adder. The classification takes the
-// specials, integers (2^53 and up) and |x| < 1 whole and otherwise loads the
-// significand and the number of fraction bits; ROUND_SPLIT masks off the
-// fraction bits (the integer part, and the same with the fraction bits set,
-// whose increment adds one unit at the integer point) and reduces them to
-// half and sticky bits; the pack picks the integer part or its increment.
-logic [5:0]  rs_amount_r;           // Fraction bits below the integer point (0-52).
-logic [52:0] rs_sig_r;              // Significand to split, then the integer part.
-logic [52:0] rs_up_r;               // Integer part with the fraction bits set.
+// FRNDINT and FSCALE round at a point the exponent gives, without a shift
+// loop and off the shared work register and adder. FRNDINT: the
+// classification takes the specials, integers (2^53 and up) and |x| < 1
+// whole and otherwise loads the significand and the number of fraction bits;
+// ROUND_SPLIT masks off the fraction bits (the integer part, and the same
+// with the fraction bits set, whose increment adds one unit at the integer
+// point) and reduces them to half and sticky bits; the pack picks the
+// integer part or its increment. FSCALE: the classification takes Intel's
+// special cases, trunc(|ST1|) (saturated at 2^16 - 1, beyond any finite
+// result's reach) and ST0's leading zeros; SCALE normalizes ST0 and adds the
+// exponents; a result below the normal range is shifted down by ROUND_SPLIT
+// (the same masks, the kept part shifted instead of masked) and rounded by
+// the pack, which also gives the overflow response.
+logic [5:0]  rs_amount_r;           // Bits below the rounding point (FRNDINT: 0-52; FSCALE: 0-63).
+logic [52:0] rs_sig_r;              // Significand to split, then the kept part.
+logic [52:0] rs_up_r;               // Kept part whose increment rounds up (FRNDINT:
+                                    // fraction bits set; FSCALE: the shifted part).
 logic        rs_half_r;             // Discarded half bit.
 logic        rs_sticky_r;           // Any discarded bit below it.
-logic        rs_lsb_r;              // Integer part's last bit (nearest-even).
+logic        rs_lsb_r;              // Kept part's last bit (nearest-even).
+logic [15:0] rs_n_r;                // FSCALE: trunc(|ST1|), saturated.
+logic        rs_n_neg_r;            // ...ST1 is negative.
+logic  [5:0] rs_lz_r;               // FSCALE: ST0's leading zeros (denormal, unnormal).
+logic [14:0] rs_exp_r;              // FSCALE: the result's biased exponent (when normal).
+logic        rs_overflow_r;         // FSCALE: the exponent is 7FFFh or more.
+logic        rs_tiny_r;             // FSCALE: the exponent is 0 or less (denormalize).
+logic        rs_vanish_r;           // FSCALE: the denormalizing shift leaves nothing.
 logic [52:0] split_frac;            // ROUND_SPLIT: positions below the point,
 logic [52:0] split_below;           // below the half bit,
 logic [52:0] split_half;            // the half bit,
 logic [52:0] split_point;           // and the kept part's last bit.
 logic [53:0] rs_sum;                // Kept part plus one unit.
 logic        rs_increment;          // The rounding direction adds the unit.
+logic        rs_scale;              // ROUND_SPLIT for FSCALE (shift, not mask).
 
 assign busy = seq_active;
 assign done = seq_done;
@@ -228,6 +245,7 @@ always_comb begin
         split_point[i] = 6'(i) == rs_amount_r;
     end
 end
+assign rs_scale = exec_op == X87_ARITH_SCALE;
 assign rs_sum = {1'b0, rs_up_r} + 54'd1;
 always_comb begin
     case (rounding_mode)
@@ -305,6 +323,7 @@ always_comb begin
         X87_ARITH_DIV:       entry = X87_ENTRY_DIV;
         X87_ARITH_SQRT:      entry = X87_ENTRY_SQRT;
         X87_ARITH_TRANS:     entry = X87_ENTRY_TRANS;
+        X87_ARITH_SCALE:     entry = X87_ENTRY_FSCALE;
         default:                entry = X87_ENTRY_FRNDINT;
     endcase
 
@@ -371,8 +390,14 @@ always_comb begin
         if (((uop_rom.pack == X87_PACK_ROUND_PACK_FST) || (uop_rom.pack == X87_PACK_PACK_FST_SPECIAL) || (uop_rom.pack == X87_PACK_PACK_FLD_DENORMAL)))
             uop.pack = X87_PACK_HOLD;
     end
-    if (X87_ABLATE_MASK[10]) begin  // FRNDINT.
-        if (uop_rom.prepare == X87_PREPARE_ROUND_SPLIT) uop.prepare = X87_PREPARE_HOLD;
+    if (X87_ABLATE_MASK[1]) begin   // FSCALE.
+        if (uop_rom.prepare == X87_PREPARE_SCALE) uop.prepare = X87_PREPARE_HOLD;
+        if (uop_rom.classify == X87_CLASSIFY_SCALE) uop.classify = X87_CLASSIFY_HOLD;
+        if (uop_rom.pack == X87_PACK_PACK_SCALE) uop.pack = X87_PACK_HOLD;
+    end
+    if (X87_ABLATE_MASK[10]) begin  // FRNDINT (and the split FSCALE shares).
+        if (X87_ABLATE_MASK[1] && (uop_rom.prepare == X87_PREPARE_ROUND_SPLIT))
+            uop.prepare = X87_PREPARE_HOLD;
         if (uop_rom.classify == X87_CLASSIFY_ROUNDINT) uop.classify = X87_CLASSIFY_HOLD;
         if (uop_rom.pack == X87_PACK_PACK_ROUNDINT) uop.pack = X87_PACK_HOLD;
     end
@@ -690,6 +715,42 @@ always_ff @(posedge clk) begin
                         rounded_up <= increment_to_one;
                     end else begin
                         direct_ready_r <= 1'b0;
+                    end
+                end
+
+                X87_CLASSIFY_SCALE: begin
+                    // Intel's FSCALE table: NaNs (ST0's first), then the
+                    // invalid pairs inf * 2^-inf and 0 * 2^+inf, then
+                    // infinities and zeros of ST0 as they are, a finite ST0
+                    // times 2^+-inf, and a 53-bit significand of zero (an
+                    // 80-bit denormal below 2^-16434) as a zero. DE (either
+                    // operand denormal) only when no NaN or invalid pair.
+                    direct_ready_r <= 1'b1;
+                    if (is_nan(operand) || is_nan(operand_b)) begin
+                        result_r <= is_nan(operand) ? quiet_nan(operand)
+                                                   : quiet_nan(operand_b);
+                        invalid <= is_signaling_nan(operand) ||
+                                   is_signaling_nan(operand_b);
+                    end else if ((operand.class_id == X87_EMPTY) ||
+                                 (operand_b.class_id == X87_EMPTY) ||
+                                 (is_infinity(operand) && is_infinity(operand_b) &&
+                                  operand_b.sign) ||
+                                 (is_zero(operand) && is_infinity(operand_b) &&
+                                  !operand_b.sign)) begin
+                        result_r <= x87_indefinite();
+                        invalid <= 1'b1;
+                    end else begin
+                        denormal_operand <= (operand.class_id == X87_DENORMAL) ||
+                                            (operand_b.class_id == X87_DENORMAL);
+                        if (is_infinity(operand) || is_zero(operand))
+                            result_r <= operand;
+                        else if (is_infinity(operand_b))
+                            result_r <= operand_b.sign ? x87_zero(operand.sign)
+                                                       : x87_infinity(operand.sign);
+                        else if (operand.sig == 53'h0)
+                            result_r <= x87_zero(operand.sign);
+                        else
+                            direct_ready_r <= 1'b0;
                     end
                 end
 
@@ -1169,6 +1230,52 @@ always_ff @(posedge clk) begin
                     rounded_up <= rs_increment;
                 end
 
+                // Masked overflow: infinity or the largest finite number as
+                // RC rounds, OE and PE. Below the normal range: the shifted
+                // significand rounded as RC says (a carry makes it the
+                // smallest normal), a denormal or zero, UE when inexact (or
+                // tiny at all with UE unmasked) and PE. An unmasked overflow
+                // or underflow leaves the destination to x87_control (no
+                // write); the wrapped result Intel stores would be exact.
+                X87_PACK_PACK_SCALE: begin
+                    result_r <= '0;
+                    result_r.sign <= operand.sign;
+                    if (rs_overflow_r) begin
+                        overflow <= 1'b1;
+                        inexact <= range_masks[0];
+                        rounded_up <= range_masks[0] &&
+                                      overflow_to_infinity(operand.sign, rounding_mode);
+                        if (overflow_to_infinity(operand.sign, rounding_mode)) begin
+                            result_r.exp <= 15'h7fff;
+                            result_r.sig <= {1'b1, 52'h0};
+                            result_r.class_id <= X87_INFINITY;
+                        end else begin
+                            result_r.exp <= 15'h7ffe;
+                            result_r.sig <= {53{1'b1}};
+                            result_r.class_id <= X87_NORMAL;
+                        end
+                    end else if (rs_tiny_r) begin
+                        underflow <= rs_half_r || rs_sticky_r || !range_masks[1];
+                        inexact <= range_masks[1] && (rs_half_r || rs_sticky_r);
+                        rounded_up <= range_masks[1] && rs_increment;
+                        if (rs_increment && rs_sum[52]) begin
+                            result_r.exp <= 15'd1;
+                            result_r.sig <= rs_sum[52:0];
+                            result_r.class_id <= X87_NORMAL;
+                        end else if (!rs_increment && rs_vanish_r) begin
+                            result_r.class_id <= X87_ZERO;
+                        end else begin
+                            result_r.exp <= 15'd0;
+                            result_r.sig <= rs_increment ? rs_sum[52:0] : rs_sig_r;
+                            result_r.class_id <= X87_DENORMAL;
+                        end
+                    end else begin
+                        result_r.exp <= rs_exp_r;
+                        result_r.sig <= rs_sig_r;
+                        result_r.class_id <= X87_NORMAL;
+                    end
+                end
+
                 X87_PACK_PACK_FIST: begin
                     logic [63:0] magnitude;
                     logic [63:0] signed_result;
@@ -1607,9 +1714,11 @@ always_ff @(posedge clk) begin
     end
 end
 
-// FRNDINT's rounding bank (see the declarations). Every path is register to
-// register: ROUND_SPLIT's one-LUT masks with their OR trees; the increment
-// is in the pack.
+// FRNDINT and FSCALE's rounding bank (see the declarations). Every path is
+// register to register: the classification's 16-bit shift and leading-zero
+// count, SCALE's normalizing shift and 18-bit exponent sums, ROUND_SPLIT's
+// one-LUT masks with their OR trees and the FSCALE shift; the increment is
+// in the pack.
 always_ff @(posedge clk) begin
     if (reset) begin
         rs_amount_r <= 6'd0;
@@ -1618,6 +1727,13 @@ always_ff @(posedge clk) begin
         rs_half_r <= 1'b0;
         rs_sticky_r <= 1'b0;
         rs_lsb_r <= 1'b0;
+        rs_n_r <= 16'h0;
+        rs_n_neg_r <= 1'b0;
+        rs_lz_r <= 6'd0;
+        rs_exp_r <= 15'h0;
+        rs_overflow_r <= 1'b0;
+        rs_tiny_r <= 1'b0;
+        rs_vanish_r <= 1'b0;
     end else if (seq_exec_valid) begin
         if (uop.classify == X87_CLASSIFY_ROUNDINT) begin
             // Fraction bits: 52 - (exp - 16383), for 2^0 <= |x| < 2^53.
@@ -1625,21 +1741,64 @@ always_ff @(posedge clk) begin
             rs_sig_r <= operand.sig;
         end
 
-        if (uop.prepare == X87_PREPARE_ROUND_SPLIT) begin
-            // No fraction bit in the significand (2^52 <= |x| < 2^53) leaves
-            // the guard bit as the half bit.
-            if (rs_amount_r == 6'd0) begin
-                rs_half_r <= operand.guard_bit;
-                rs_sticky_r <= operand.round_bit || operand.sticky_bit;
-            end else begin
-                rs_half_r <= |(rs_sig_r & split_half);
-                rs_sticky_r <= |(rs_sig_r & split_below) || operand.guard_bit ||
-                               operand.round_bit || operand.sticky_bit;
-            end
-            rs_lsb_r <= |(rs_sig_r & split_point);
-            rs_sig_r <= rs_sig_r & ~split_frac;
-            rs_up_r <= rs_sig_r | split_frac;
+        if (uop.classify == X87_CLASSIFY_SCALE) begin
+            logic signed [16:0] unbiased_b;
+            unbiased_b = $signed({2'b00, operand_b.exp}) - 17'sd16383;
+            if ((operand_b.class_id == X87_ZERO) || (unbiased_b < 0))
+                rs_n_r <= 16'h0;
+            else if (unbiased_b > 17'sd15)
+                rs_n_r <= 16'hffff;
+            else
+                rs_n_r <= operand_b.sig[52:37] >> (4'd15 - unbiased_b[3:0]);
+            rs_n_neg_r <= operand_b.sign;
+            rs_lz_r <= x87_leading_zeros(operand.sig);
         end
+
+        case (uop.prepare)
+            X87_PREPARE_SCALE: begin
+                // An 80-bit denormal's exponent field 0 counts as 1.
+                logic signed [17:0] exp0;
+                logic signed [17:0] scaled;
+                logic signed [17:0] shift;
+                exp0 = (operand.exp == 15'h0) ? 18'sd1 : $signed({3'b000, operand.exp});
+                scaled = rs_n_neg_r ? exp0 - $signed({12'h0, rs_lz_r}) - $signed({2'b00, rs_n_r})
+                                    : exp0 - $signed({12'h0, rs_lz_r}) + $signed({2'b00, rs_n_r});
+                shift = rs_n_neg_r ? 18'sd1 - exp0 + $signed({12'h0, rs_lz_r}) + $signed({2'b00, rs_n_r})
+                                   : 18'sd1 - exp0 + $signed({12'h0, rs_lz_r}) - $signed({2'b00, rs_n_r});
+                rs_sig_r <= operand.sig << rs_lz_r;
+                rs_exp_r <= scaled[14:0];
+                rs_overflow_r <= scaled >= 18'sd32767;
+                rs_tiny_r <= shift > 0;
+                rs_vanish_r <= shift >= 18'sd53;
+                rs_amount_r <= (shift <= 0) ? 6'd0 : (shift >= 18'sd63) ? 6'd63 : shift[5:0];
+            end
+
+            X87_PREPARE_ROUND_SPLIT: begin
+                // FRNDINT: no fraction bit in the significand leaves the guard
+                // bit as the half bit. FSCALE (rs_scale): nothing below the
+                // point when the result is normal; an 80-bit ST0's bits
+                // beyond 53 only add to the sticky bit.
+                logic any_grs;
+                any_grs = operand.guard_bit || operand.round_bit || operand.sticky_bit;
+                if (rs_amount_r == 6'd0) begin
+                    rs_half_r <= !rs_scale && operand.guard_bit;
+                    rs_sticky_r <= !rs_scale && (operand.round_bit || operand.sticky_bit);
+                end else begin
+                    rs_half_r <= |(rs_sig_r & split_half);
+                    rs_sticky_r <= |(rs_sig_r & split_below) || any_grs;
+                end
+                rs_lsb_r <= |(rs_sig_r & split_point);
+                if (rs_scale) begin
+                    rs_sig_r <= rs_sig_r >> rs_amount_r;
+                    rs_up_r <= rs_sig_r >> rs_amount_r;
+                end else begin
+                    rs_sig_r <= rs_sig_r & ~split_frac;
+                    rs_up_r <= rs_sig_r | split_frac;
+                end
+            end
+
+            default: ;
+        endcase
     end
 end
 

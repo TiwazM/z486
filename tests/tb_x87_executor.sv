@@ -186,6 +186,7 @@ x87_executor dut (
     .trans_cosine(trans_cosine),
     .trans_atan2(trans_atan2),
     .trans_logexp(2'b00),
+    .range_masks(2'b11),
     .operand(operand),
     .operand_b(operand_b),
     .transfer_in(transfer_in),

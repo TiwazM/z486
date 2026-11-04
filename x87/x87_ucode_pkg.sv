@@ -47,7 +47,8 @@ typedef enum logic [3:0] {
     X87_ARITH_MUL,
     X87_ARITH_DIV,
     X87_ARITH_SQRT,
-    X87_ARITH_TRANS
+    X87_ARITH_TRANS,
+    X87_ARITH_SCALE         // FSCALE: operand * 2^trunc(operand_b)
 } x87_exec_op_t;
 
 // Synchronous command-ROM actions. The ROM converts the 11-bit ESC/FOP

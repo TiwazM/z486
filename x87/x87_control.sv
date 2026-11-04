@@ -126,7 +126,7 @@ logic [79:0] stack_read_raw_b;         // forwarded row (below).
 logic [79:0] stack_ram_q_a;
 logic [79:0] stack_ram_q_b;
 // A command may be accepted while a plain executor operation (register or
-// memory arithmetic, a compare, FSQRT, FRNDINT) runs, with every exception
+// memory arithmetic, a compare, FSQRT, FRNDINT, FSCALE) runs, with every exception
 // masked. It reads its stack rows at acceptance, relative to TOP after that
 // operation's pops, and is held (command_pending, command_held) until the
 // operation has retired; then it dispatches in the cycle its result is written
@@ -319,17 +319,6 @@ logic [2:0]   fprem_quotient_bits;
 logic         fprem_nearest;             // FPREM1: round the quotient to nearest.
 logic         fxtract_exp_pending;       // FXTRACT: the FILD of the exponent writes here.
 logic [2:0]   fxtract_exp_index;
-typedef enum logic [1:0] {
-    FSCALE_IDLE,
-    FSCALE_SHIFT,
-    FSCALE_APPLY
-} fscale_phase_t;
-fscale_phase_t fscale_phase;
-x87_reg_t      fscale_value;
-logic   [52:0] fscale_shift;
-logic    [5:0] fscale_shift_count;
-logic          fscale_sign;
-logic signed [31:0] fscale_delta;
 logic   [7:0] v2_exec_uaddr;
 
 wire [15:0] status_word = {status_flags[15:14], top, status_flags[10:0]};
@@ -872,7 +861,6 @@ wire core_cmd_idle = ((rx_kind == RX_NONE) || restartable_rx_command) &&
                    !v2_exec_busy && !v2_exec_done &&
                    !fptan_trans_pending && !fptan_div_pending &&
                    !fptan_push_after_result &&
-                   (fscale_phase == FSCALE_IDLE) &&
                    !poly_active &&
                    !read_resp_valid;
 // Taken behind a running plain operation: register forms but the status
@@ -921,6 +909,7 @@ assign quiet = !direct_pending && core_cmd_idle;
 wire held_short = (command_decode.action == X87_CMD_ARITH) ||
                   (command_decode.action == X87_CMD_FSQRT) ||
                   (command_decode.action == X87_CMD_FRNDINT) ||
+                  (command_decode.action == X87_CMD_FSCALE) ||
                   (command_decode.action == X87_CMD_MEMORY_MATH) ||
                   (command_decode.action == X87_CMD_LOAD) ||
                   (command_decode.action == X87_CMD_FLD_ST) ||
@@ -999,13 +988,10 @@ always_comb begin
             bcd_load_adjusted[bcd_digit*4 +: 4] =
                 bcd_load_digits[bcd_digit*4 +: 4] - 4'd3;
 end
-wire signed [32:0] fscale_scaled_exp =
-    $signed({18'b0, fscale_value.exp}) + fscale_delta;
 assign busy_n = !(((v2_exec_owner == EXEC_MATH) &&
                    (v2_exec_pending || v2_exec_busy)) ||
                   poly_active ||
                   bcd_convert_pending || bcd_load_pending ||
-                  (fscale_phase != FSCALE_IDLE) ||
                   (command_pending && command_is_arithmetic));
 // PEREQ releases the 80386 coprocessor-wait microcode as well as requesting
 // operand transfers. Keep it asserted throughout an accepted command because
@@ -1020,7 +1006,6 @@ assign pereq = (rx_kind != RX_NONE) || poly_active ||
                v2_exec_pending || v2_exec_busy || v2_exec_done ||
                fptan_trans_pending || fptan_div_pending ||
                fptan_push_after_result ||
-               (fscale_phase != FSCALE_IDLE) ||
                status_read_pending || command_complete_pulse ||
                (pereq_release_hold != 2'b00);
 assign error_n = !status_flags[7];
@@ -1132,6 +1117,7 @@ function automatic logic ablated_exec_op(input x87_exec_op_t op);
            (X87_ABLATE_MASK[8] && ((op == X87_CONVERT_FILD) || (op == X87_CONVERT_FIST))) ||
            (X87_ABLATE_MASK[9] && ((op == X87_CONVERT_FLD_M32) || (op == X87_CONVERT_FLD_M64) ||
                                    (op == X87_CONVERT_FST_M32) || (op == X87_CONVERT_FST_M64))) ||
+           (X87_ABLATE_MASK[1] && (op == X87_ARITH_SCALE)) ||
            (X87_ABLATE_MASK[10] && (op == X87_CONVERT_FRNDINT)) ||
            (X87_ABLATE_MASK[11] && ((op == X87_ARITH_ADD) || (op == X87_ARITH_SUB)));
 endfunction
@@ -1336,6 +1322,7 @@ x87_executor executor (
     .trans_cosine(trans_cosine),
     .trans_atan2(trans_atan2),
     .trans_logexp(trans_logexp),
+    .range_masks(control_word[4:3]),
     .operand(arith_operand_a),
     .operand_b(arith_operand_b),
     .transfer_in(v2_exec_transfer),
@@ -1491,12 +1478,6 @@ always_ff @(posedge clk) begin
         fprem_dividend <= x87_empty();
         fprem_divisor <= x87_empty();
         fprem_quotient_bits <= 3'b000;
-        fscale_phase <= FSCALE_IDLE;
-        fscale_value <= x87_empty();
-        fscale_shift <= '0;
-        fscale_shift_count <= '0;
-        fscale_sign <= 1'b0;
-        fscale_delta <= '0;
         read_resp_valid <= 1'b0;
         read_resp_data <= 32'h0;
         clear_stack();
@@ -1783,36 +1764,6 @@ always_ff @(posedge clk) begin
             fptan_div_pending <= 1'b0;
             if (!math_unmasked_exception)
                 fptan_push_after_result <= 1'b1;
-        end
-
-        // FSCALE needs only the truncated integer part of ST(1). Shift its
-        // significand one bit per cycle instead of building a 53-bit barrel
-        // shifter on the stack-RAM output.
-        if (fscale_phase == FSCALE_SHIFT) begin
-            fscale_shift <= fscale_shift >> 1;
-            fscale_shift_count <= fscale_shift_count - 6'd1;
-            if (fscale_shift_count == 6'd1) begin
-                fscale_delta <= fscale_sign
-                              ? -$signed({1'b0, fscale_shift[31:1]})
-                              :  $signed({1'b0, fscale_shift[31:1]});
-                fscale_phase <= FSCALE_APPLY;
-            end
-        end else if (fscale_phase == FSCALE_APPLY) begin
-            result_write_index <= st0_index;
-            if ((fscale_value.class_id != X87_NORMAL) &&
-                (fscale_value.class_id != X87_DENORMAL))
-                result_write_raw <= x87_to_m80(fscale_value);
-            else if (fscale_scaled_exp >= 33'sh7fff)
-                result_write_raw <= {fscale_value.sign, 15'h7fff,
-                                     64'h8000_0000_0000_0000};
-            else if (fscale_scaled_exp <= 0)
-                result_write_raw <= {fscale_value.sign, 79'h0};
-            else
-                result_write_raw <= {fscale_value.sign,
-                                     fscale_scaled_exp[14:0],
-                                     fscale_value.sig, 11'h0};
-            result_write_pending <= 1'b1;
-            fscale_phase <= FSCALE_IDLE;
         end
 
         // FPREM reuses the existing divide, round-to-integer, multiply, and
@@ -2454,28 +2405,21 @@ always_ff @(posedge clk) begin
                         if (control_word[0])
                             write_stack(st0_index, x87_indefinite());
                     end else begin
-                        fscale_value <= stack_read_data_a;
-                        fscale_sign <= stack_read_data_b.sign;
-                        if ((stack_read_data_a.class_id != X87_NORMAL) &&
-                            (stack_read_data_a.class_id != X87_DENORMAL)) begin
-                            fscale_delta <= 32'sd0;
-                            fscale_phase <= FSCALE_APPLY;
-                        end else if ((stack_read_data_b.class_id == X87_ZERO) ||
-                                     (stack_read_data_b.exp < 15'd16383)) begin
-                            fscale_delta <= 32'sd0;
-                            fscale_phase <= FSCALE_APPLY;
-                        end else if (stack_read_data_b.exp > 15'd16413) begin
-                            fscale_delta <= stack_read_data_b.sign
-                                          ? -32'sh7fff_ffff
-                                          :  32'sh7fff_ffff;
-                            fscale_phase <= FSCALE_APPLY;
-                        end else begin
-                            fscale_shift <= stack_read_data_b.sig;
-                            fscale_shift_count <= 6'(
-                                15'd16435 - stack_read_data_b.exp);
-                            fscale_phase <= FSCALE_SHIFT;
-                        end
+                        // ST0 * 2^trunc(ST1) in the executor (X87_ARITH_SCALE),
+                        // retired as arithmetic: flags, C1, unmasked exceptions.
                         command_complete_pulse <= 1'b0;
+                        exec_plain <= 1'b1;
+                        arith_compare <= 1'b0;
+                        arith_write_result <= 1'b1;
+                        arith_pop_count <= 2'd0;
+                        arith_dest_index <= st0_index;
+                        v2_exec_op <= X87_ARITH_SCALE;
+                        v2_exec_owner <= EXEC_MATH;
+                        v2_exec_size <= 2'd0;
+                        arith_operand_a <= stack_read_data_a;
+                        arith_operand_b <= stack_read_data_b;
+                        v2_exec_transfer <= 64'h0;
+                        v2_exec_pending <= 1'b1;
                     end
                 end
                 X87_CMD_FPREM: begin
