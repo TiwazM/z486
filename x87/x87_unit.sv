@@ -187,6 +187,11 @@ wire         st_cmd = direct_st_r && store_go && !cancel &&
 wire         result_pop = (st_state == ST_READ) && !st_status_r;
 logic        result_valid;
 logic [31:0] result_data;
+// The store's result comes whole when control converts it while the store
+// waits (all but FBSTP): every part in one cycle, not through the queue.
+wire         result_whole_take = direct_st_r && (st_state == ST_READ) && !st_status_r;
+logic        result_whole_valid;
+logic [79:0] result_whole_data;
 wire         dcmd_sel = dcmd_pending_r || st_cmd;    // a command write (F8)
 wire         own_cmd = dcmd_sel;
 assign direct_taken = direct_active || direct_reg_r || direct_st_r || op_taken_r ||
@@ -277,6 +282,9 @@ if (ENABLE_X87) begin : gen_x87
         .read_resp_data(read_resp_data),
         .result_pop(result_pop), .result_valid(result_valid),
         .result_data(result_data),
+        .result_whole_take(result_whole_take),
+        .result_whole_valid(result_whole_valid),
+        .result_whole_data(result_whole_data),
         .status_out(status_word), .control_out(control_word),
         .busy_n(ctl_busy_n), .pereq(ctl_pereq), .error_n(error_n),
         .queue_safe(queue_safe), .mask_load_pending(mask_load_pending),
@@ -288,6 +296,8 @@ end else begin : gen_no_x87
     assign req_complete = 1'b0;
     assign result_valid = 1'b0;
     assign result_data = 32'h0;
+    assign result_whole_valid = 1'b0;
+    assign result_whole_data = 80'h0;
     assign status_word = 16'h0;
     assign control_word = 16'h0;
     assign x87_quiet = 1'b0;
@@ -392,6 +402,12 @@ always_ff @(posedge clk) begin
                     st_commit_r <= 1'b1;
                     st_state    <= ST_DONE;
                 end
+            end else if (result_whole_valid) begin
+                st_part0_r  <= result_whole_data[31:0];
+                st_part1_r  <= result_whole_data[63:32];
+                st_part2_r  <= result_whole_data[79:64];
+                st_commit_r <= 1'b1;
+                st_state    <= ST_DONE;
             end else if (result_valid) begin
                 case (st_taken_r)
                     2'd0:    st_part0_r <= result_data;

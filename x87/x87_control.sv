@@ -37,6 +37,9 @@ module x87_control
     input  logic        result_pop,             // A direct store takes the head result fragment.
     output logic        result_valid,           // A store result fragment heads the queue.
     output logic [31:0] result_data,            // ...as the data port would return it.
+    input  logic        result_whole_take,      // A direct store waits for its result:
+    output logic        result_whole_valid,     // ...then it comes whole, all parts in
+    output logic [79:0] result_whole_data,      // one cycle, instead of through the queue.
     output logic [15:0] status_out,             // Status word, for a direct FNSTSW.
     output logic [15:0] control_out,            // Control word, for a direct FNSTCW.
 
@@ -186,6 +189,7 @@ logic         store_pop;
 logic         store_source_empty;
 x87_reg_t     store_source;
 logic [79:0]  store_source_raw;
+x87_fast_fst_t store_fast;             // FST m32/m64 in one step, where it applies.
 logic         store_bcd;
 logic         bcd_convert_pending;
 logic  [6:0]  bcd_shift_count;
@@ -743,6 +747,29 @@ task automatic launch_memory_math(input x87_reg_t operand);
     end
 endtask
 
+// A store's converted value: whole to a direct store that waits for it
+// (result_whole_take), else into the transfer queue for the original
+// routine's data-port reads, in count parts, the last with last_be.
+task automatic deliver_store(
+    input logic [79:0] value,
+    input logic  [1:0] count,
+    input logic  [3:0] last_be
+);
+    begin
+        if (result_whole_take) begin
+            result_whole_valid <= 1'b1;
+            result_whole_data <= value;
+        end else begin
+            tx_state_shift <= {80'h0, value};
+            tx_count <= count;
+            tx_last_be <= last_be;
+            tx_index <= 5'd0;
+            tx_kind <= TX_VALUE;
+            tx_generation_done <= 1'b0;
+        end
+    end
+endtask
+
 task automatic start_store(
     input logic integer_store,
     input logic [1:0] width,
@@ -995,9 +1022,12 @@ assign busy_n = !(((v2_exec_owner == EXEC_MATH) &&
                   (command_pending && command_is_arithmetic));
 // PEREQ releases the 80386 coprocessor-wait microcode as well as requesting
 // operand transfers. Keep it asserted throughout an accepted command because
-// a one-cycle completion pulse can precede the CPU's CORWAIT sample.
+// a one-cycle completion pulse can precede the CPU's CORWAIT sample. That
+// includes a transfer's first clock, before its first word is in the queue
+// (a store packed without the executor gets there right after its set-up):
+// a data-port read waits for the word.
 assign pereq = (rx_kind != RX_NONE) || poly_active ||
-               ((tx_kind != TX_NONE) && transfer_pop_valid) ||
+               ((tx_kind != TX_NONE) && (transfer_pop_valid || !tx_generation_done)) ||
                direct_pending || command_pending ||
                stack_write_a || stack_write_b ||
                push_pending || memory_math_pending ||
@@ -1305,6 +1335,9 @@ assign pf_next_word = x87_poly_word_t'(x87_poly_word(pf_next_pc));
 assign poly_opa_read = poly_word.a_const ? poly_const_q : poly_scratch_q;
 assign poly_round_low3 = x87_integer_low3(v2_exec_result);
 
+assign store_fast = x87_fast_fst(store_source_raw, store_width == 2'd1,
+                                  control_word[11:10]);
+
 wire [1:0] executor_rounding_mode =
     poly_internal                ? 2'b00 :
     (fprem_phase == FPREM_ROUND) ? (fprem_nearest ? 2'b00 : 2'b11)
@@ -1480,9 +1513,12 @@ always_ff @(posedge clk) begin
         fprem_quotient_bits <= 3'b000;
         read_resp_valid <= 1'b0;
         read_resp_data <= 32'h0;
+        result_whole_valid <= 1'b0;
+        result_whole_data <= 80'h0;
         clear_stack();
     end else begin
         read_resp_valid <= 1'b0;
+        result_whole_valid <= 1'b0;
         command_complete_pulse <= 1'b0;
         stack_write_a <= 1'b0;
         stack_write_b <= 1'b0;
@@ -1520,15 +1556,25 @@ always_ff @(posedge clk) begin
                 v2_exec_transfer <= 64'h0;
                 v2_exec_pending <= 1'b1;
             end else if (!store_integer && (store_width == 2'd2)) begin
-                logic [79:0] store_m80_value;
-                store_m80_value = store_source_raw;
-                tx_state_shift <= {80'h0, store_m80_value};
-                tx_count <= 2'd3;
-                tx_last_be <= 4'h3;
-                tx_index <= 5'd0;
-                tx_kind <= TX_VALUE;
-                tx_generation_done <= 1'b0;
+                deliver_store(store_source_raw, 2'd3, 4'h3);
                 if (store_pop && (!store_source_empty || control_word[0]))
+                    pop_pending <= 1'b1;
+            end else if (!store_integer && !store_source_empty && store_fast.ok) begin
+                // FST m32/m64 of a normal, a zero or an infinity whose result
+                // needs no denormal or overflow handling: rounded and packed
+                // here, straight into the transfer queue as FSTP m80 is, with
+                // the PE and C1 the executor's conversion reports.
+                deliver_store({16'h0, store_fast.bits},
+                              (store_width == 2'd1) ? 2'd2 : 2'd1, 4'hf);
+                status_flags[9] <= store_fast.rounded_up;
+                if (store_fast.inexact) begin
+                    status_flags[5] <= 1'b1;
+                    if (!control_word[5]) begin
+                        status_flags[7] <= 1'b1;
+                        status_flags[15] <= 1'b1;
+                    end
+                end
+                if (store_pop)
                     pop_pending <= 1'b1;
             end else begin
                 v2_exec_op <= store_integer ? X87_CONVERT_FIST
@@ -1614,15 +1660,12 @@ always_ff @(posedge clk) begin
                             bcd_convert_pending <= 1'b1;
                         end
                     end else begin
-                        tx_state_shift <= {96'h0, v2_exec_transfer_out};
-                        tx_count <= ((store_integer && (store_width == 2'd2)) ||
-                                     (!store_integer && (store_width == 2'd1)))
-                                  ? 2'd2 : 2'd1;
-                        tx_last_be <= (store_integer && (store_width == 2'd0))
-                                    ? 4'h3 : 4'hf;
-                        tx_index <= 5'd0;
-                        tx_kind <= TX_VALUE;
-                        tx_generation_done <= 1'b0;
+                        deliver_store({16'h0, v2_exec_transfer_out},
+                                      ((store_integer && (store_width == 2'd2)) ||
+                                       (!store_integer && (store_width == 2'd1)))
+                                      ? 2'd2 : 2'd1,
+                                      (store_integer && (store_width == 2'd0))
+                                      ? 4'h3 : 4'hf);
                     end
                     if (v2_exec_invalid)
                         raise_invalid();

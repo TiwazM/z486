@@ -8,6 +8,8 @@
 #
 #   ./run_x87_testfloat80.sh TESTFLOAT_BUILD_DIR TESTBENCH OUT_DIR [LEVEL] [FUNCTION...]
 #
+# X87_TF_PLUSARGS adds plusargs to every run (e.g. +FAST=1); the testbench's
+# own lines go to OUT_DIR/tb.log.
 # OUT_DIR/summary.tsv: function, precision, rounding, operands, cases, errors;
 # OUT_DIR/<function>_<pc>_<rc>_<set>.ver: testfloat_ver's report with the
 # failing cases (the first 100 each).
@@ -33,8 +35,10 @@ if [[ ${#functions[@]} -eq 0 ]]; then
                f32_to_extF80 f64_to_extF80 i32_to_extF80 i64_to_extF80)
 fi
 rounds=(rnear_even rmin rmax rminMag)      # x87 RC 0..3
+read -ra plusargs <<< "${X87_TF_PLUSARGS:-}"
 
 mkdir -p "$out"
+: > "$out/tb.log"
 summary=$out/summary.tsv
 printf "function\tprecision\trounding\toperands\tcases\terrors\n" > "$summary"
 
@@ -57,7 +61,8 @@ run_one() {    # function pc_bits pc rc set gen_options...
         rm -f "$base.in"
         return
     fi
-    "$tb" "+FUNC=$fn" "+PC=$pc" "+ROUND=$rc" "+IN=$base.in" "+OUT=$base.out" > /dev/null
+    "$tb" "+FUNC=$fn" "+PC=$pc" "+ROUND=$rc" "+IN=$base.in" "+OUT=$base.out" \
+        ${plusargs[@]+"${plusargs[@]}"} >> "$out/tb.log"
     "$tf/testfloat_ver" -errors 1000000000 "${opts[@]}" "$fn" < "$base.out" 2>&1 \
         | tr '\r' '\n' | grep -v '^ *[0-9 ]*$' > "$base.ver" || true
     local errors

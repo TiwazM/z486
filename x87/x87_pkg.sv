@@ -371,6 +371,85 @@ function automatic logic [79:0] x87_to_m80(input x87_reg_t value);
     end
 endfunction
 
+// FST/FSTP m32 and m64 in one step, for the values whose result needs no
+// denormal, overflow or NaN handling: a normal operand whose rounded result
+// is a normal of the format, a zero or an infinity. Anything else (ok = 0)
+// goes through the executor's conversion. The operand is the register's
+// 80-bit image (bit 63 the explicit integer bit); m32 results are in the low
+// half. inexact is PE, rounded_up C1 (the magnitude grew).
+typedef struct packed {
+    logic        ok;
+    logic [63:0] bits;
+    logic        inexact;
+    logic        rounded_up;
+} x87_fast_fst_t;
+
+function automatic x87_fast_fst_t x87_fast_fst(
+    input logic [79:0] raw,
+    input logic        to_m64,
+    input logic [1:0]  rounding_mode
+);
+    x87_fast_fst_t r;
+    logic        sign;
+    logic [14:0] exp;
+    logic [10:0] e64;
+    logic [7:0]  e32;
+    logic        in_range;
+    logic [52:0] keep;        // the integer bit and the kept fraction bits
+    logic        lsb, guard, sticky, increment;
+    logic [53:0] rounded;
+    begin
+        r = '0;
+        sign = raw[79];
+        exp = raw[78:64];
+        // The format's biased exponent before rounding (15360 = 16383 - 1023,
+        // 16256 = 16383 - 127), in range when it is 1..2046 (1..254).
+        e64 = 11'(exp - 15'd15360);
+        e32 = 8'(exp - 15'd16256);
+        if (to_m64) begin
+            in_range = (exp >= 15'd15361) && (exp <= 15'd17406);
+            keep = raw[63:11];
+            guard = raw[10];
+            sticky = |raw[9:0];
+        end else begin
+            in_range = (exp >= 15'd16257) && (exp <= 15'd16510);
+            keep = {29'h0, raw[63:40]};
+            guard = raw[39];
+            sticky = |raw[38:0];
+        end
+        lsb = keep[0];
+        case (rounding_mode)
+            2'b00:   increment = guard && (sticky || lsb);
+            2'b01:   increment = sign && (guard || sticky);
+            2'b10:   increment = !sign && (guard || sticky);
+            default: increment = 1'b0;
+        endcase
+        rounded = {1'b0, keep} + 54'(increment);
+        if ((exp == 15'h0) && (raw[63:0] == 64'h0)) begin
+            r.ok = 1'b1;
+            r.bits = to_m64 ? {sign, 63'h0} : {32'h0, sign, 31'h0};
+        end else if ((exp == 15'h7fff) && (raw[63:0] == 64'h8000_0000_0000_0000)) begin
+            r.ok = 1'b1;
+            r.bits = to_m64 ? {sign, 11'h7ff, 52'h0} : {32'h0, sign, 8'hff, 23'h0};
+        end else if (in_range && raw[63]) begin
+            r.inexact = guard || sticky;
+            r.rounded_up = increment;
+            if (to_m64) begin
+                // A carry out of the significand moves to the next binade;
+                // from the top binade that is an overflow: the executor's.
+                r.ok = !(rounded[53] && (e64 == 11'd2046));
+                r.bits = rounded[53] ? {sign, e64 + 11'd1, 52'h0}
+                                     : {sign, e64, rounded[51:0]};
+            end else begin
+                r.ok = !(rounded[24] && (e32 == 8'd254));
+                r.bits = rounded[24] ? {32'h0, sign, e32 + 8'd1, 23'h0}
+                                     : {32'h0, sign, e32, rounded[22:0]};
+            end
+        end
+        return r;
+    end
+endfunction
+
 function automatic logic x87_has_fraction(input x87_reg_t value);
     integer unbiased;
     integer discarded_bits;

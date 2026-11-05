@@ -9,6 +9,9 @@
 //
 //   +FUNC=<TestFloat function> +PC=<0|2|3> +ROUND=<0..3, the x87 RC>
 //   +IN=<testfloat_gen output> +OUT=<file for testfloat_ver>
+//   +FAST=1: extF80_to_f32/f64 take x87_fast_fst's result where it has one
+//   (x87_control's one-step FST), the executor's elsewhere; the cases where
+//   the two differ (value, PE or C1) are counted.
 module tb_x87_testfloat80;
 
 import x87_pkg::*;
@@ -33,6 +36,7 @@ logic inexact;
 logic divide_by_zero;
 logic overflow;
 logic underflow;
+logic rounded_up;
 logic [63:0] transfer_out;
 logic compare_unordered;
 logic compare_less;
@@ -68,7 +72,7 @@ x87_executor dut (
     .underflow(underflow),
     .denormal_operand(),
     .range_incomplete(),
-    .rounded_up(),
+    .rounded_up(rounded_up),
     .compare_unordered(compare_unordered),
     .compare_less(compare_less),
     .compare_equal(compare_equal)
@@ -111,7 +115,8 @@ endtask
 
 initial begin
     string func, in_path, out_path;
-    integer pc, round, fi, fo, fields, cases;
+    integer pc, round, fi, fo, fields, cases, fast, fast_taken, fast_differ;
+    x87_fast_fst_t ff;
     kind_t kind;
     logic rel_less, rel_equal;      // the relation's terms (le = both)
     logic [79:0] a80, b80, r80;
@@ -125,6 +130,9 @@ initial begin
     if (!$value$plusargs("OUT=%s", out_path)) $fatal(1, "missing +OUT");
     if (!$value$plusargs("PC=%d", pc)) pc = 3;
     if (!$value$plusargs("ROUND=%d", round)) round = 0;
+    if (!$value$plusargs("FAST=%d", fast)) fast = 0;
+    fast_taken = 0;
+    fast_differ = 0;
 
     precision_control = pc[1:0];
     rounding_mode = round[1:0];
@@ -188,27 +196,48 @@ initial begin
             default:  transfer_in = 64'h0;
         endcase
         run_op(cases);
+        f = flags();
+        if ((fast != 0) && ((func == "extF80_to_f32") || (func == "extF80_to_f64"))) begin
+            ff = x87_fast_fst(a80, func == "extF80_to_f64", rounding_mode);
+            if (ff.ok) begin
+                fast_taken = fast_taken + 1;
+                if ((ff.bits != ((func == "extF80_to_f64") ? transfer_out
+                                                          : {32'h0, transfer_out[31:0]})) ||
+                    (ff.inexact != inexact) || (ff.rounded_up != rounded_up)) begin
+                    fast_differ = fast_differ + 1;
+                    if (fast_differ <= 10)
+                        $display("fast/executor differ: %h -> fast %h x%0d c1%0d, executor %h x%0d c1%0d",
+                                 a80, ff.bits, ff.inexact, ff.rounded_up,
+                                 transfer_out, inexact, rounded_up);
+                end
+                transfer_out = ff.bits;
+                f = {7'h0, ff.inexact};
+            end
+        end
 
         case (kind)
-            K_BIN80:  $fwrite(fo, "%h %h %h %h\n", a80, b80, x87_to_m80(result), flags());
-            K_UN80:   $fwrite(fo, "%h %h %h\n", a80, x87_to_m80(result), flags());
+            K_BIN80:  $fwrite(fo, "%h %h %h %h\n", a80, b80, x87_to_m80(result), f);
+            K_UN80:   $fwrite(fo, "%h %h %h\n", a80, x87_to_m80(result), f);
             K_CMP80: begin
                 r1 = !compare_unordered &&
                      ((rel_less && compare_less) || (rel_equal && compare_equal));
-                $fwrite(fo, "%h %h %h %h\n", a80, b80, r1, flags());
+                $fwrite(fo, "%h %h %h %h\n", a80, b80, r1, f);
             end
             K_TO32: begin
                 r32 = transfer_out[31:0];
-                $fwrite(fo, "%h %h %h\n", a80, r32, flags());
+                $fwrite(fo, "%h %h %h\n", a80, r32, f);
             end
-            K_TO64:   $fwrite(fo, "%h %h %h\n", a80, transfer_out, flags());
-            K_FROM32: $fwrite(fo, "%h %h %h\n", a32, x87_to_m80(result), flags());
-            default:  $fwrite(fo, "%h %h %h\n", a64, x87_to_m80(result), flags());
+            K_TO64:   $fwrite(fo, "%h %h %h\n", a80, transfer_out, f);
+            K_FROM32: $fwrite(fo, "%h %h %h\n", a32, x87_to_m80(result), f);
+            default:  $fwrite(fo, "%h %h %h\n", a64, x87_to_m80(result), f);
         endcase
     end
     $fclose(fi);
     $fclose(fo);
     $display("tb_x87_testfloat80: %s pc=%0d rc=%0d cases=%0d", func, pc, round, cases);
+    if (fast != 0)
+        $display("tb_x87_testfloat80: fast path taken %0d, differs from the executor %0d",
+                 fast_taken, fast_differ);
     $finish;
 end
 

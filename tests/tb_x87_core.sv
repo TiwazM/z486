@@ -38,6 +38,7 @@ x87_control dut (
     .read_req_be(read_req_be), .read_req_ready(read_req_ready),
     .read_resp_valid(read_resp_valid), .read_resp_data(read_resp_data),
     .result_pop(1'b0), .result_valid(), .result_data(),
+    .result_whole_take(1'b0), .result_whole_valid(), .result_whole_data(),
     .status_out(), .control_out(),
     .busy_n(busy_n), .pereq(pereq), .error_n(error_n),
     .queue_safe(), .mask_load_pending(), .queue_short(), .debug_state()
