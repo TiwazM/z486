@@ -192,6 +192,25 @@ logic [31:0] result_data;
 wire         result_whole_take = direct_st_r && (st_state == ST_READ) && !st_status_r;
 logic        result_whole_valid;
 logic [79:0] result_whole_data;
+// An FST/FSTP m32/m64 or FSTP m80 asks control to pack ST0 from its issue
+// (store_peek), while its overlay checks the destination; control answers
+// when it is idle and the bridge is empty, so nothing can come between the
+// packing and the store's command. With the value in hand (st_peek_have_r)
+// the store word ends as soon as its command is accepted; the command still
+// pops and sets the flags, and its value is dropped (result_discard, until
+// control reports it dropped).
+logic        st_peek_tried_r;      // The issued store has had its answer.
+logic        st_peek_have_r;       // ...and it was packed: st_part*_r hold it.
+logic        peek_inflight_r;      // A store whose value we have is in flight.
+wire         store_peek = direct_st_r && !st_status_r && (st_state == ST_IDLE) &&
+                          !st_peek_tried_r && !posted_pending && !dcmd_pending_r;
+logic        store_peek_answer;
+logic [10:0] store_peek_answer_fop;
+logic        store_peek_ok;
+logic [79:0] store_peek_data;
+logic        result_dropped;
+wire         st_peek_take = store_peek && store_peek_answer &&
+                            (store_peek_answer_fop == direct_fop);
 wire         dcmd_sel = dcmd_pending_r || st_cmd;    // a command write (F8)
 wire         own_cmd = dcmd_sel;
 assign direct_taken = direct_active || direct_reg_r || direct_st_r || op_taken_r ||
@@ -285,6 +304,11 @@ if (ENABLE_X87) begin : gen_x87
         .result_whole_take(result_whole_take),
         .result_whole_valid(result_whole_valid),
         .result_whole_data(result_whole_data),
+        .store_peek(store_peek), .store_peek_fop(direct_fop),
+        .store_peek_answer(store_peek_answer),
+        .store_peek_answer_fop(store_peek_answer_fop),
+        .store_peek_ok(store_peek_ok), .store_peek_data(store_peek_data),
+        .result_discard(peek_inflight_r), .result_dropped(result_dropped),
         .status_out(status_word), .control_out(control_word),
         .busy_n(ctl_busy_n), .pereq(ctl_pereq), .error_n(error_n),
         .queue_safe(queue_safe), .mask_load_pending(mask_load_pending),
@@ -298,6 +322,11 @@ end else begin : gen_no_x87
     assign result_data = 32'h0;
     assign result_whole_valid = 1'b0;
     assign result_whole_data = 80'h0;
+    assign store_peek_answer = 1'b0;
+    assign store_peek_answer_fop = 11'h0;
+    assign store_peek_ok = 1'b0;
+    assign store_peek_data = 80'h0;
+    assign result_dropped = 1'b0;
     assign status_word = 16'h0;
     assign control_word = 16'h0;
     assign x87_quiet = 1'b0;
@@ -334,6 +363,9 @@ always_ff @(posedge clk) begin
         st_part1_r          <= 32'h0;
         st_part2_r          <= 16'h0;
         st_commit_r         <= 1'b0;
+        st_peek_tried_r     <= 1'b0;
+        st_peek_have_r      <= 1'b0;
+        peek_inflight_r     <= 1'b0;
         direct_reg_r        <= 1'b0;
         dcmd_pending_r      <= 1'b0;
         direct_active       <= 1'b0;
@@ -393,9 +425,36 @@ always_ff @(posedge clk) begin
 
         st_commit_r <= 1'b0;
         x87_quiet_r <= x87_quiet && !dcmd_pending_r;
+        if (st_peek_take) begin
+            st_peek_tried_r <= 1'b1;
+            if (store_peek_ok) begin
+                st_peek_have_r <= 1'b1;
+                st_part0_r     <= store_peek_data[31:0];
+                st_part1_r     <= store_peek_data[63:32];
+                st_part2_r     <= store_peek_data[79:64];
+            end
+        end
+        if (result_dropped)
+            peek_inflight_r <= 1'b0;
         case (st_state)
-            ST_IDLE: if (st_cmd) st_state <= br_accepted ? ST_READ : ST_CMD;
-            ST_CMD:  if (br_accepted) st_state <= ST_READ;
+            ST_IDLE: if (st_cmd) begin
+                if (!br_accepted)
+                    st_state <= ST_CMD;
+                else if (st_peek_have_r) begin
+                    st_commit_r     <= 1'b1;
+                    st_state        <= ST_DONE;
+                    peek_inflight_r <= 1'b1;
+                end else
+                    st_state <= ST_READ;
+            end
+            ST_CMD:  if (br_accepted) begin
+                if (st_peek_have_r) begin
+                    st_commit_r     <= 1'b1;
+                    st_state        <= ST_DONE;
+                    peek_inflight_r <= 1'b1;
+                end else
+                    st_state <= ST_READ;
+            end
             ST_READ: if (st_status_r) begin
                 if (x87_quiet_r) begin
                     st_part0_r  <= {16'h0, st_control_r ? control_word : status_word};
@@ -455,6 +514,8 @@ always_ff @(posedge clk) begin
                                     error_n && l_status) ? ST_READ : ST_IDLE;
             st_parts_r          <= l_parts;
             st_taken_r          <= 2'd0;
+            st_peek_tried_r     <= 1'b0;
+            st_peek_have_r      <= 1'b0;
             direct_reg_r        <= ENABLE_X87 && esc_candidate && l_regcmd &&
                                  direct_allowed && error_n && !dcmd_pending_r &&
                                  (((busy_n || queue_safe) && !posted_pending) ||
@@ -491,6 +552,8 @@ always_ff @(posedge clk) begin
 
         if (cancel) begin
             direct_st_r         <= 1'b0;
+            st_peek_tried_r     <= 1'b0;
+            st_peek_have_r      <= 1'b0;
             st_state            <= ST_IDLE;
             st_commit_r         <= 1'b0;
             direct_reg_r        <= 1'b0;
@@ -513,6 +576,12 @@ always_ff @(posedge clk) begin
         $error("x87 store result has more parts than its overlay writes");
     if (reset_n && dcmd_pending_r && (br_accepted != br_idle))
         $error("x87 register command acceptance differs from bridge idle");
+end
+integer peek_inflight_cycles = 0;
+always_ff @(posedge clk) begin
+    peek_inflight_cycles <= peek_inflight_r ? peek_inflight_cycles + 1 : 0;
+    if (reset_n && (peek_inflight_cycles == 1000))
+        $error("x87 store packed early: its command never dropped its value");
 end
 // synthesis translate_on
 

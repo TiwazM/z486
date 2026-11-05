@@ -40,6 +40,14 @@ module x87_control
     input  logic        result_whole_take,      // A direct store waits for its result:
     output logic        result_whole_valid,     // ...then it comes whole, all parts in
     output logic [79:0] result_whole_data,      // one cycle, instead of through the queue.
+    input  logic        store_peek,             // A direct FST/FSTP m32/m64 or FSTP m80
+    input  logic [10:0] store_peek_fop,         // ...issued: pack ST0 for it while idle.
+    output logic        store_peek_answer,      // ...answered (one cycle), for this FOP:
+    output logic [10:0] store_peek_answer_fop,
+    output logic        store_peek_ok,          // ...packed (else the command converts),
+    output logic [79:0] store_peek_data,
+    input  logic        result_discard,         // The store in flight was packed early:
+    output logic        result_dropped,         // ...its value goes nowhere (one cycle).
     output logic [15:0] status_out,             // Status word, for a direct FNSTSW.
     output logic [15:0] control_out,            // Control word, for a direct FNSTCW.
 
@@ -119,6 +127,7 @@ logic [47:0] direct_tail_data;         // ...low fragment first.
 logic [2:0] stack_addr_a;              // Retained physical stack address for port A.
 logic [2:0] stack_addr_b;              // Retained physical stack address for port B.
 logic [2:0] stack_port_addr_a;
+logic       peek_read;                 // Port A reads ST0 for an early store packing.
 logic [2:0] stack_port_addr_b;
 logic       stack_write_a;
 logic       stack_write_b;
@@ -748,8 +757,10 @@ task automatic launch_memory_math(input x87_reg_t operand);
 endtask
 
 // A store's converted value: whole to a direct store that waits for it
-// (result_whole_take), else into the transfer queue for the original
-// routine's data-port reads, in count parts, the last with last_be.
+// (result_whole_take), nowhere for one that has it already (result_discard:
+// packed while it checked its destination), else into the transfer queue for
+// the original routine's data-port reads, in count parts, the last with
+// last_be.
 task automatic deliver_store(
     input logic [79:0] value,
     input logic  [1:0] count,
@@ -759,6 +770,13 @@ task automatic deliver_store(
         if (result_whole_take) begin
             result_whole_valid <= 1'b1;
             result_whole_data <= value;
+        end else if (result_discard) begin
+            result_dropped <= 1'b1;
+            // synthesis translate_off
+            if (value != store_peek_data)
+                $error("x87 store packed early as %h, at its command as %h",
+                       store_peek_data, value);
+            // synthesis translate_on
         end else begin
             tx_state_shift <= {80'h0, value};
             tx_count <= count;
@@ -1183,6 +1201,62 @@ always_comb begin
     if (core_cmd_valid && core_cmd_ready) begin
         stack_port_addr_a = accept_top;
         stack_port_addr_b = accept_row_b;
+    end else if (peek_read) begin
+        stack_port_addr_a = st0_index;
+    end
+end
+
+// Early store packing. A direct FST/FSTP m32/m64 or FSTP m80 asks from its
+// issue, while the CPU checks the destination. With control idle (nothing
+// accepted, queued, running or being written, the bridge empty: x87_unit's
+// side), port A reads ST0 and the next cycle packs it as the store set-up
+// would (x87_fast_fst, the raw image for m80). Nothing changes here: the
+// store's command still comes and pops and sets PE and C1 as always, and
+// only its value is dropped (result_discard). Until that command, no other
+// can arrive (the store's instruction is executing), so its value is the
+// one packed here; a store that gets no answer, or a "not here" (empty ST0,
+// a denormal result, ...), waits for its value as before.
+function automatic logic [1:0] peek_kind(input logic [10:0] fop);   // 1 m32, 2 m64, 3 m80
+    if (fop[7:6] == 2'b11)
+        return 2'd0;
+    case (fop[10:8])
+        3'd1:    return (fop[5:4] == 2'b01) ? 2'd1 : 2'd0;    // D9 /2 /3
+        3'd5:    return (fop[5:4] == 2'b01) ? 2'd2 : 2'd0;    // DD /2 /3
+        3'd3:    return (fop[5:3] == 3'd7)  ? 2'd3 : 2'd0;    // DB /7
+        default: return 2'd0;
+    endcase
+endfunction
+logic        peek_read_r;           // Port A read ST0 for a peek last cycle.
+logic  [1:0] peek_kind_r;
+logic [10:0] peek_fop_r;
+wire  peek_idle = quiet && !cmd_valid && (rx_kind == RX_NONE) && !read_resp_valid;
+assign peek_read = store_peek && !peek_read_r && !store_peek_answer && peek_idle &&
+                   (peek_kind(store_peek_fop) != 2'd0);
+x87_fast_fst_t peek_fast;
+assign peek_fast = x87_fast_fst(stack_read_raw_a, peek_kind_r == 2'd2, control_word[11:10]);
+always_ff @(posedge clk) begin
+    if (reset) begin
+        peek_read_r <= 1'b0;
+        peek_kind_r <= 2'd0;
+        peek_fop_r <= 11'h0;
+        store_peek_answer <= 1'b0;
+        store_peek_answer_fop <= 11'h0;
+        store_peek_ok <= 1'b0;
+        store_peek_data <= 80'h0;
+    end else begin
+        peek_read_r <= peek_read;
+        if (peek_read) begin
+            peek_kind_r <= peek_kind(store_peek_fop);
+            peek_fop_r <= store_peek_fop;
+        end
+        store_peek_answer <= peek_read_r;
+        if (peek_read_r) begin
+            store_peek_answer_fop <= peek_fop_r;
+            store_peek_ok <= !stack_empty(st0_index) &&
+                             ((peek_kind_r == 2'd3) || peek_fast.ok);
+            store_peek_data <= (peek_kind_r == 2'd3) ? stack_read_raw_a
+                                                     : {16'h0, peek_fast.bits};
+        end
     end
 end
 
@@ -1515,10 +1589,12 @@ always_ff @(posedge clk) begin
         read_resp_data <= 32'h0;
         result_whole_valid <= 1'b0;
         result_whole_data <= 80'h0;
+        result_dropped <= 1'b0;
         clear_stack();
     end else begin
         read_resp_valid <= 1'b0;
         result_whole_valid <= 1'b0;
+        result_dropped <= 1'b0;
         command_complete_pulse <= 1'b0;
         stack_write_a <= 1'b0;
         stack_write_b <= 1'b0;
