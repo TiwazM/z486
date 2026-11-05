@@ -10,9 +10,10 @@
 ;   sees the next instruction's address); the result is the divide's.
 ; - Short, the overlap: FDIV runs, FADD is held, FMUL waits in the bridge,
 ;   and the WAIT behind them holds through all three; INTR comes after it.
-; - Long: FSIN runs some 340 cycles; the WAIT behind it goes to the routine,
-;   which takes INTR (the handler sees the WAIT's address) and, restarted,
-;   waits FSIN out. The result is FSIN's without the interrupt.
+; - Long: FSIN runs some 320 cycles; the WAIT behind it goes to the routine,
+;   which takes INTR (the handler sees the WAIT's address) and, restarted
+;   well inside FSIN, goes to the routine again and waits FSIN out. The
+;   result is FSIN's without the interrupt.
 
 BITS 16
 org 0
@@ -127,7 +128,7 @@ after_overlap:
     fninit
     fld qword [x]
     sti
-    INTR_IN 200
+    INTR_IN 100
     fsin
 fwait_long:
     fwait

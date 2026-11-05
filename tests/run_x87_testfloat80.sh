@@ -9,7 +9,8 @@
 #   ./run_x87_testfloat80.sh TESTFLOAT_BUILD_DIR TESTBENCH OUT_DIR [LEVEL] [FUNCTION...]
 #
 # X87_TF_PLUSARGS adds plusargs to every run (e.g. +FAST=1); the testbench's
-# own lines go to OUT_DIR/tb.log.
+# own lines go to OUT_DIR/tb.log. X87_TF_TRACE=1 keeps every case's result,
+# flags and C1 in OUT_DIR/<run>.trace, to compare two executors bit for bit.
 # OUT_DIR/summary.tsv: function, precision, rounding, operands, cases, errors;
 # OUT_DIR/<function>_<pc>_<rc>_<set>.ver: testfloat_ver's report with the
 # failing cases (the first 100 each).
@@ -61,8 +62,10 @@ run_one() {    # function pc_bits pc rc set gen_options...
         rm -f "$base.in"
         return
     fi
+    local trace=()
+    [[ -n ${X87_TF_TRACE:-} ]] && trace=("+TRACE=$base.trace")
     "$tb" "+FUNC=$fn" "+PC=$pc" "+ROUND=$rc" "+IN=$base.in" "+OUT=$base.out" \
-        ${plusargs[@]+"${plusargs[@]}"} >> "$out/tb.log"
+        ${trace[@]+"${trace[@]}"} ${plusargs[@]+"${plusargs[@]}"} >> "$out/tb.log"
     "$tf/testfloat_ver" -errors 1000000000 "${opts[@]}" "$fn" < "$base.out" 2>&1 \
         | tr '\r' '\n' | grep -v '^ *[0-9 ]*$' > "$base.ver" || true
     local errors

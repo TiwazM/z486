@@ -30,7 +30,7 @@ COND = {
     "NORMALIZE_MORE": 12,
     "SHIFT_RIGHT": 13,
     "SHIFT_RIGHT_MORE": 14,
-    "ADDSUB_NORMALIZE_MORE": 15,
+    "ADDSUB_ZERO": 15,
     "ARITH_DIRECT": 19,
 }
 
@@ -271,18 +271,19 @@ PROGRAM: list[ProgramItem] = [
                            src_a="OPERAND_A", src_b="OPERAND_B",
                            classify="ADDSUB", prepare="ADDSUB",
                            destination="WORK", count="LOAD")),
-    ("addsub_align", UOp(flow="LOOP", target="addsub_align",
-                          condition="COUNT_MORE", src_a="OPERAND_B",
+    # The smaller operand is aligned in one step (shifted right by the
+    # exponent difference, every bit shifted out ORed into its sticky bit),
+    # and the sum normalized in one (right by one on a carry, else left by
+    # its leading zeros); an exact zero sum commits from there.
+    ("addsub_align", UOp(src_a="OPERAND_B",
                           engine="ADDSUB_ALIGN", count="DEC", grs="SHIFT")),
     ("addsub_calculate", UOp(src_a="WORK", src_b="OPERAND_B",
                               alu_route="CALCULATE_ADDSUB",
                               destination="WORK")),
-    ("addsub_normalize", UOp(flow="LOOP", target="addsub_normalize",
-                              condition="ADDSUB_NORMALIZE_MORE", src_a="WORK",
+    ("addsub_normalize", UOp(flow="BRANCH", target="addsub_commit",
+                              condition="ADDSUB_ZERO", src_a="WORK",
                               alu_route="NORMALIZE_ADDSUB",
                               destination="WORK")),
-    (None, UOp(flow="BRANCH", target="addsub_commit",
-               condition="DIRECT_READY")),
     (None, UOp(src_a="WORK", alu_route="PREP_ROUND_ADDSUB",
                destination="WORK", grs="LOAD")),
     (None, UOp(flow="FINISH", src_a="WORK", pack="PACK_ADDSUB", destination="RESULT",

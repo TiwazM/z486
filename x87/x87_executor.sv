@@ -75,7 +75,7 @@ logic format_m32;
 logic arithmetic_op;
 logic effective_b_sign;
 logic round_sign;
-logic addsub_normalize_more;
+logic [5:0] addsub_lz;
 logic round_discarded;
 logic round_increment;
 logic [67:0] rounded_work;
@@ -86,7 +86,6 @@ logic [67:0] arithmetic_result;
 logic [1:0] operand_magnitude;
 logic fild_shift_four;
 logic fist_shift_four;
-logic addsub_shift_four;
 logic work_shift_four;
 // Keep the raw m80 operand's G/R/S tail until the product is rounded. Dropping
 // it first biases BASIC's decimal scaling constants (VAL("5") becomes < 5).
@@ -178,15 +177,19 @@ assign round_sign = ((exec_op == X87_ARITH_DIV) ||
                   ? divsqrt_result_sign_r
                   : (exec_op == X87_ARITH_MUL) ? mul_result_sign_r
                   : arithmetic_op ? add_result_sign_r : operand.sign;
-assign addsub_normalize_more = (work_r[56:0] != 57'h0) &&
-                               (work_r[56] || !work_r[55]);
+// The sum's leading zeros below bit 55 (0 with bit 55 set): normalize shifts
+// left by them in one step, as its 4- and 1-bit steps added up to.
+always_comb begin
+    addsub_lz = 6'd0;
+    for (int i = 0; i < 56; i++)
+        if (work_r[i])
+            addsub_lz = 6'(55 - i);
+end
 assign fild_shift_four = (exec_op == X87_CONVERT_FILD) &&
                          (uop.shift_route == X87_SHIFT_LEFT) &&
                          (work_r[51:48] == 4'b0000);
 assign fist_shift_four = (exec_op == X87_CONVERT_FIST) &&
                          (count_r >= 6'd4);
-assign addsub_shift_four =
-    (uop.engine == X87_ENGINE_ADDSUB_ALIGN) && (count_r >= 6'd4);
 assign work_shift_four = fild_shift_four || fist_shift_four;
 assign format_m32 = (exec_op == X87_CONVERT_FLD_M32) ||
                     (exec_op == X87_CONVERT_FST_M32);
@@ -334,8 +337,7 @@ always_comb begin
     conditions[X87_COND_COUNT_MORE] =
         ((uop.engine == X87_ENGINE_DIV_ITERATE) && divsqrt_lead_r)
         ? (count_r > 6'd2) :
-        (((exec_op == X87_CONVERT_FIST) && fist_shift_four) ||
-           addsub_shift_four)
+        ((exec_op == X87_CONVERT_FIST) && fist_shift_four)
         ? (count_r > 6'd4) : (count_r > 6'd1);
     conditions[X87_COND_TRANSFER_READY] = 1'b1;
     conditions[X87_COND_ZERO] = zero_r;
@@ -346,8 +348,7 @@ always_comb begin
     conditions[X87_COND_NORMALIZE_MORE] = !work_r[51];
     conditions[X87_COND_SHIFT_RIGHT] = shift_right_r;
     conditions[X87_COND_SHIFT_RIGHT_MORE] = |work_r[63:54];
-    conditions[X87_COND_ADDSUB_NORMALIZE_MORE] =
-        addsub_normalize_more;
+    conditions[X87_COND_ADDSUB_ZERO] = work_r[56:0] == 57'h0;
     conditions[X87_COND_ARITH_DIRECT] =
         is_nan(operand) || is_nan(operand_b) ||
         is_infinity(operand) || is_infinity(operand_b) ||
@@ -654,8 +655,8 @@ always_ff @(posedge clk) begin
 
             if ((uop.count == X87_COUNT_DEC) &&
                 (count_r != 6'd0))
-                count_r <= count_r -
-                    ((fist_shift_four || addsub_shift_four) ? 6'd4 : 6'd1);
+                count_r <= (uop.engine == X87_ENGINE_ADDSUB_ALIGN) ? 6'd0
+                         : count_r - (fist_shift_four ? 6'd4 : 6'd1);
 
             if ((uop.grs == X87_GRS_SHIFT) &&
                 (uop.shift_route == X87_SHIFT_RIGHT)) begin
@@ -1107,9 +1108,8 @@ always_ff @(posedge clk) begin
                     end else if (work_r[56]) begin
                         work_r <= {11'h0, 1'b0, work_r[56:2],
                                    work_r[1] | work_r[0]};
-                    end else if (!work_r[55]) begin
-                        work_r <= (work_r[55:52] == 4'h0)
-                                ? work_r << 4 : work_r << 1;
+                    end else begin
+                        work_r <= work_r << addsub_lz;
                     end
                 end
 
@@ -1811,22 +1811,24 @@ always_ff @(posedge clk) begin
         add_result_sign_r <= 1'b0;
         add_small_sign_r <= 1'b0;
     end else if (seq_exec_valid) begin
+        // Aligned in one step by the whole exponent difference: right by
+        // count_r, every bit shifted out (and the new bit 0) ORed into bit
+        // 0, as count_r one-bit steps of the 386-style sticky shift would.
         if ((uop.engine == X87_ENGINE_ADDSUB_ALIGN) &&
             (count_r != 6'd0)) begin
-            if (addsub_shift_four)
-                add_small_r <= {4'b0, add_small_r[55:5],
-                                |add_small_r[4:0]};
-            else
-                add_small_r <= {1'b0, add_small_r[55:2],
-                                add_small_r[1] | add_small_r[0]};
+            logic [55:0] shifted;
+            logic [56:0] low_mask;
+            shifted = add_small_r >> count_r;
+            low_mask = (57'h2 << count_r) - 57'h1;
+            add_small_r <= {shifted[55:1],
+                            |({1'b0, add_small_r} & low_mask)};
         end
 
         if (uop.alu_route == X87_ALU_NORMALIZE_ADDSUB) begin
             if ((work_r[56:0] != 57'h0) && work_r[56])
                 add_exp_r <= add_exp_r + 15'd1;
-            else if ((work_r[56:0] != 57'h0) && !work_r[55])
-                add_exp_r <= add_exp_r -
-                    ((work_r[55:52] == 4'h0) ? 15'd4 : 15'd1);
+            else if (work_r[56:0] != 57'h0)
+                add_exp_r <= add_exp_r - 15'(addsub_lz);
         end
 
         if (divsqrt_iterate)

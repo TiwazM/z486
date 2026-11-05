@@ -92,6 +92,21 @@ data("S32", b"\0" * 4)
 data("S64", b"\0" * 8)
 data("S80", b"\0" * 10)
 data("V0_2", f64(0.2))
+# Whetstone (Curnow & Wichmann): its constants and a value of X, its E1 array
+data("WX", f64(0.75))
+data("WY", f64(0.5))
+data("WT", f64(0.499975))
+data("WT1", f64(0.50025))
+data("WT2", f64(2.0))
+data("WONE", f64(1.0))
+data("WE1", f64(1.0))
+data("WE2", f64(-1.0))
+data("WE3", f64(-1.0))
+data("WE4", f64(-1.0))
+data("WX1", f64(0.0))
+data("WY1", f64(0.0))
+data("WZ", f64(0.0))
+data("WE", f64(0.0) * 4)
 
 
 def D(name):
@@ -236,6 +251,37 @@ T("expr m64: FLD/FMUL/FADD/FSTP m64", [], rep([f"fld {m64('A64')}", f"fmul {m64(
 T("expr m32: FLD/FMUL/FADD/FSTP m32", [], rep([f"fld {m32('A32')}", f"fmul {m32('AINV32')}", f"fadd {m32('A32')}", f"fstp {m32('S32')}"], 2), n=32)
 T("C ftol: FLD ST/FNSTCW/FLDCW/FISTP m32/FLDCW", [f"fld {m64('V1234_56')}"],
   ["fld st(0)", f"fnstcw {m16('S16')}", f"fldcw {m16('CW_TRUNC')}", f"fistp {m32('S32')}", f"fldcw {m16('CW')}"], n=32)
+
+# Whetstone's floating-point statements as a 486-era compiler emits them,
+# each reading fixed inputs (the values stay put from loop to loop). Per
+# 1,000 Whetstone instructions: module 2 (an array statement) 12 x 4, module 3
+# (the PA procedure) 14 x 6 x 4 statements, module 7 (trig) 32, module 8 (P3)
+# 899, module 9 (P0, three m64 copies) 616, module 11 (standard functions) 93.
+W_ARRAY = [f"fld {m64('WE1')}", f"fadd {m64('WE2')}", f"fadd {m64('WE3')}",
+           f"fsub {m64('WE4')}", f"fmul {m64('WT')}", f"fstp {m64('WE')}"]
+# X = T*ATAN(T2*SIN(X)*COS(X)/(COS(X+Y)+COS(X-Y)-1.0))
+W_TRIG = [f"fld {m64('WX')}", "fsin", f"fld {m64('WX')}", "fcos", "fmulp st(1), st",
+          f"fmul {m64('WT2')}", f"fld {m64('WX')}", f"fadd {m64('WY')}", "fcos",
+          f"fld {m64('WX')}", f"fsub {m64('WY')}", "fcos", "faddp st(1), st",
+          f"fsub {m64('WONE')}", "fdivp st(1), st", "fld1", "fpatan",
+          f"fmul {m64('WT')}", f"fstp {m64('WZ')}"]
+# X = SQRT(EXP(ALOG(X)/T1)): ln by FYL2X, exp by F2XM1 and FSCALE
+W_FUNC = ["fldln2", f"fld {m64('WX')}", "fyl2x", f"fdiv {m64('WT1')}",
+          "fldl2e", "fmulp st(1), st", "fld st(0)", "frndint", "fsub st(1), st",
+          "fxch st(1)", "f2xm1", "fld1", "faddp st(1), st", "fscale", "fstp st(1)",
+          "fsqrt", f"fstp {m64('WZ')}"]
+# P3: X1 = T*(X+Y); Y1 = T*(X1+Y); Z = (X1+Y1)/T2
+W_P3 = [f"fld {m64('WX')}", f"fadd {m64('WY')}", f"fmul {m64('WT')}", f"fstp {m64('WX1')}",
+        f"fld {m64('WX1')}", f"fadd {m64('WY')}", f"fmul {m64('WT')}", f"fstp {m64('WY1')}",
+        f"fld {m64('WX1')}", f"fadd {m64('WY1')}", f"fdiv {m64('WT2')}", f"fstp {m64('WZ')}"]
+# P0: E1(J) = E1(K); E1(K) = E1(L); E1(L) = E1(J)
+W_P0 = [f"fld {m64('WE2')}", f"fstp {m64('WE')}", f"fld {m64('WE3')}", f"fstp {m64('WX1')}",
+        f"fld {m64('WE4')}", f"fstp {m64('WY1')}"]
+T("Whetstone array statement (modules 2, 3)", [], W_ARRAY, n=32)
+T("Whetstone trig statement (module 7)", [], W_TRIG, n=8)
+T("Whetstone standard functions (module 11)", [], W_FUNC, n=8)
+T("Whetstone P3 (module 8)", [], W_P3, n=32)
+T("Whetstone P0 (module 9)", [], W_P0, n=32)
 
 # integer overlap with a long x87 operation
 for nadd in (0, 8, 16, 32, 48, 64, 96, 128):

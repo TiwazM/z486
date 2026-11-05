@@ -12,6 +12,8 @@
 //   +FAST=1: extF80_to_f32/f64 take x87_fast_fst's result where it has one
 //   (x87_control's one-step FST), the executor's elsewhere; the cases where
 //   the two differ (value, PE or C1) are counted.
+//   +TRACE=<file>: every case's result, flags and C1 (rounded_up) as the
+//   executor gives them, for comparing two versions of it bit for bit.
 module tb_x87_testfloat80;
 
 import x87_pkg::*;
@@ -115,7 +117,8 @@ endtask
 
 initial begin
     string func, in_path, out_path;
-    integer pc, round, fi, fo, fields, cases, fast, fast_taken, fast_differ;
+    integer pc, round, fi, fo, ft, fields, cases, fast, fast_taken, fast_differ;
+    string trace_path;
     x87_fast_fst_t ff;
     kind_t kind;
     logic rel_less, rel_equal;      // the relation's terms (le = both)
@@ -176,6 +179,11 @@ initial begin
     if (fi == 0) $fatal(1, "cannot open %s", in_path);
     fo = $fopen(out_path, "w");
     if (fo == 0) $fatal(1, "cannot open %s", out_path);
+    ft = 0;
+    if ($value$plusargs("TRACE=%s", trace_path)) begin
+        ft = $fopen(trace_path, "w");
+        if (ft == 0) $fatal(1, "cannot open %s", trace_path);
+    end
 
     cases = 0;
     while (!$feof(fi)) begin
@@ -196,6 +204,10 @@ initial begin
             default:  transfer_in = 64'h0;
         endcase
         run_op(cases);
+        if (ft != 0)
+            $fwrite(ft, "%h %h %h %h %h %b %b%b%b\n", a80, b80, x87_to_m80(result),
+                    transfer_out, flags(), rounded_up,
+                    compare_unordered, compare_less, compare_equal);
         f = flags();
         if ((fast != 0) && ((func == "extF80_to_f32") || (func == "extF80_to_f64"))) begin
             ff = x87_fast_fst(a80, func == "extF80_to_f64", rounding_mode);
@@ -234,6 +246,8 @@ initial begin
     end
     $fclose(fi);
     $fclose(fo);
+    if (ft != 0)
+        $fclose(ft);
     $display("tb_x87_testfloat80: %s pc=%0d rc=%0d cases=%0d", func, pc, round, cases);
     if (fast != 0)
         $display("tb_x87_testfloat80: fast path taken %0d, differs from the executor %0d",
