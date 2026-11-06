@@ -27,7 +27,7 @@ hold while its request completes.
 | `store-imm` | `015` | `STORE` | `015` | `015 016` | `store` | `retain` | ea |
 | `load-r` | `019` | `LOAD` | `019 01A` | `019 01A 01B` | `mem-dst` | `retain` | ea |
 | `alu-r-m` | `027` | `LOAD` | `027 029` | `027 028 029 02A` | `alu-dst/flags` | `reclaim` | ea, dst, flags-adc-sbb |
-| `cmp-r-m` | `02C` | `LOAD` | `02C 02E` | `02C 02D 02E 02F` | `flags` | `reclaim` | ea |
+| `cmp-r-m` | `02C` | `LOAD` | `02C 02E` | `02C 02D 02E 02F` | `flags` | `reclaim` | ea, dst |
 | `cmp-test-m-imm` | `031` | `LOAD` | `031 033` | `031 032 033 034` | `flags` | `reclaim` | ea |
 | `cmp-test-m-r` | `035` | `LOAD` | `035 037` | `035 036 037 038` | `flags` | `reclaim` | ea, src |
 | `rmw-m-imm` | `039` | `RMW` | `039 03B 046` | `039 03A 03B 046 047` | `store/flags` | `retain` | ea |
