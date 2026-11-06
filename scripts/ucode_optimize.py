@@ -1468,7 +1468,7 @@ def render_recipe_svh(words: list[int]) -> str:
         "            end",
         f"            {recipe_entries('call-rel')}: begin",
         "                r.hardwired = 1'b1; r.multi_ustep = 1'b1;",
-        "                if (e.data32) r.commit_sel = RECIPE_COMMIT_ESP;",
+        "                r.commit_sel = RECIPE_COMMIT_ESP;",
         "                r.uses_ea = 1'b1; r.br_rel = 1'b1;",
         "            end",
         f"            {recipe_entries('ret-near')}: begin",

@@ -78,6 +78,7 @@ module data_access
     input  logic                    vm,
     input  logic                    seg_gp_fault,
     input  logic                    ss_flat32,
+    input  logic                    ss_cs_full16,     // 16-bit SS and CS, both limits FFFFh or more
     input  logic [5:0]              seg_readable,     // per segment: a read needs no microcode check
     // Data unit: load writeback and operands
     input  logic [31:0]             forwarded_esp,
@@ -113,6 +114,7 @@ module data_access
     output logic                    d2_vipt_pipe_ready,
     output logic                    d2_vipt_pop,
     output logic                    d2_vipt_ret,
+    output logic                    d2_ret_predictable, // a RET the return stack may predict
     output logic                    d2_vipt_rmw,
     output logic                    d2_vipt_rmw_candidate,
     output logic                    vipt_issue_load,
@@ -549,7 +551,11 @@ always_ff @(posedge clk) begin
                     dcache_vipt_resolve_data, vipt_load_ex_r.lane,
                     vipt_load_ex_r.mem_size, vipt_load_ex_r.result_kind);
                 vipt_load_wb_ret_r <= vipt_load_ex_r.is_ret;
-                vipt_load_wb_target_r <= dcache_vipt_resolve_data;
+                // A 16-bit RET's target is its word, zero-extended.
+                vipt_load_wb_target_r <= (vipt_load_ex_r.mem_size == 2'd1)
+                    ? format_hardwired_load(dcache_vipt_resolve_data, vipt_load_ex_r.lane,
+                                            2'd1, LOAD_RESULT_COPY)
+                    : dcache_vipt_resolve_data;
                 vipt_load_wb_dst_r <= vipt_load_ex_r.dst;
                 vipt_load_wb_dst_onehot_r <= vipt_load_ex_r.dst_onehot;
                 vipt_load_wb_fwd_mask_r <= vipt_load_ex_r.is_alu ? 8'd0 : vipt_load_ex_r.dst_onehot;
@@ -634,7 +640,8 @@ always_ff @(posedge clk) begin
                 OPR_R, 2'd0, vipt_load_slow_r.mem_size,
                 vipt_load_slow_r.result_kind);
             vipt_load_wb_ret_r <= vipt_load_slow_r.is_ret;
-            vipt_load_wb_target_r <= OPR_R;
+            vipt_load_wb_target_r <= (vipt_load_slow_r.mem_size == 2'd1) ? {16'd0, OPR_R[15:0]}
+                                                                         : OPR_R;
             vipt_load_wb_dst_r <= vipt_load_slow_r.dst;
             vipt_load_wb_dst_onehot_r <= vipt_load_slow_r.dst_onehot;
             vipt_load_wb_fwd_mask_r <= vipt_load_slow_r.is_alu ? 8'd0 : vipt_load_slow_r.dst_onehot;
@@ -908,7 +915,7 @@ wire d2_vipt_movx = i_bus.has_0f && i_bus.data32 &&
 assign d2_vipt_alu = i_bus.vipt_alu;
 assign d2_vipt_dst = d2_vipt_ret ? 3'd4 :
                      d2_vipt_movx ? i_bus.src_reg_sel : i_bus.dst_reg_sel;
-assign d2_vipt_mem_size = d2_vipt_ret ? 2'd2 :
+assign d2_vipt_mem_size = d2_vipt_ret ? (i_bus.data32 ? 2'd2 : 2'd1) :
                           d2_vipt_movx ? i_bus.source_size : i_bus.operand_size;
 assign d2_vipt_write_size = (d2_vipt_movx || d2_vipt_ret) ? 2'd2
                                                           : i_bus.operand_size;
@@ -936,11 +943,24 @@ assign d2_vipt_pop = !i_bus.has_0f && (i_bus.opcode[7:3] == 5'b01011) &&
 // A 32-bit near RET is a direct load of its target: on writeback the load
 // port writes ESP (ESP + 4 + imm16) and the target redirects the front end,
 // as the hardware branch uStep does; its ROM words do not execute.
+// A 16-bit near RET in real or V86 mode is one too when no access of it can
+// fault: a 16-bit stack and CS whose limits hold every 16-bit offset, so only
+// the word straddling SP=FFFFh could (SP[1:0] = 3 keeps that one, and the
+// other words that would not be contained in a dword anyway, on the ROM
+// path). Its target is the word, zero-extended; SP wraps in 16 bits.
+// The RET's target prediction takes only what holds while it waits in D2;
+// SP can change meanwhile, so the SP[1:0] test decides the direct path alone
+// (a predicted RET that takes the ROM path gives up its predicted line).
 wire d2_flat_ss32 = pe && ss_flat32;
-assign d2_vipt_ret = !i_bus.has_0f && ((i_bus.opcode == 8'hC3) || (i_bus.opcode == 8'hC2)) &&
-                     i_bus.data32 && i_bus.stack_op && d2_flat_ss32;
-assign d2_ret_esp = forwarded_esp + 32'd4 +
-                    ((i_bus.opcode == 8'hC2) ? {16'd0, i_bus.immediate[15:0]} : 32'd0);
+assign d2_ret_predictable = !i_bus.has_0f &&
+                            ((i_bus.opcode == 8'hC3) || (i_bus.opcode == 8'hC2)) &&
+                            i_bus.stack_op &&
+                            (i_bus.data32 ? d2_flat_ss32 : ((!pe || vm) && ss_cs_full16));
+assign d2_vipt_ret = d2_ret_predictable &&
+                     (i_bus.data32 || (forwarded_esp[1:0] != 2'b11));
+wire [15:0] d2_ret_imm = (i_bus.opcode == 8'hC2) ? i_bus.immediate[15:0] : 16'd0;
+assign d2_ret_esp = i_bus.data32 ? forwarded_esp + 32'd4 + {16'd0, d2_ret_imm}
+                                 : {forwarded_esp[31:16], forwarded_esp[15:0] + 16'd2 + d2_ret_imm};
 // A direct access skips the microcode's segment check; one whose segment is
 // not readable (a null selector) takes the ROM path, which faults.
 wire d2_seg_readable = !pe || vm || (i_bus.mem_seg < 4'd6 && seg_readable[i_bus.mem_seg[2:0]]);

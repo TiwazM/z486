@@ -148,21 +148,14 @@ function automatic recipe_rom_t recipe_id_decode(
             r.meta.uses_ea = 1'd1;
             r.early = 3'd7;
         end
-        6'd26: begin  // 075
-            r.meta.hardwired = 1'd1;
-            r.meta.multi_ustep = 1'd1;
-            r.meta.uses_ea = 1'd1;
-            r.meta.br_rel = 1'd1;
-            r.early = 3'd7;
-        end
-        6'd27: begin  // 02C 031 035
+        6'd26: begin  // 02C 031 035
             r.meta.hardwired = 1'd1;
             r.meta.multi_ustep = 1'd1;
             r.meta.uses_ea = 1'd1;
             r.meta.writes_flags = 1'd1;
             r.early = 3'd3;
         end
-        6'd28: begin  // 065
+        6'd27: begin  // 065
             r.meta.hardwired = 1'd1;
             r.meta.multi_ustep = 1'd1;
             r.meta.reads_flags = 1'd1;
@@ -170,7 +163,7 @@ function automatic recipe_rom_t recipe_id_decode(
             r.meta.br_rel = 1'd1;
             r.early = 3'd6;
         end
-        6'd29: begin  // 039
+        6'd28: begin  // 039
             r.meta.hardwired = 1'd1;
             r.meta.multi_ustep = 1'd1;
             r.meta.slot_has_work = 1'd1;
@@ -178,7 +171,7 @@ function automatic recipe_rom_t recipe_id_decode(
             r.meta.writes_flags = 1'd1;
             r.early = 3'd5;
         end
-        6'd30: begin  // 027
+        6'd29: begin  // 027
             r.meta.hardwired = 1'd1;
             r.meta.multi_ustep = 1'd1;
             r.meta.commit_sel = 3'd1;
@@ -188,7 +181,7 @@ function automatic recipe_rom_t recipe_id_decode(
             r.reads_carry = 1'b1;
             r.early = 3'd3;
         end
-        6'd31: begin  // 0F9 105
+        6'd30: begin  // 0F9 105
             r.meta.hardwired = 1'd1;
             r.meta.multi_ustep = 1'd1;
             r.meta.commit_sel = 3'd2;
@@ -196,7 +189,7 @@ function automatic recipe_rom_t recipe_id_decode(
             r.meta.writes_flags = 1'd1;
             r.early = 3'd1;
         end
-        6'd32: begin  // 0FF
+        6'd31: begin  // 0FF
             r.meta.hardwired = 1'd1;
             r.meta.multi_ustep = 1'd1;
             r.meta.commit_sel = 3'd2;
@@ -205,7 +198,7 @@ function automatic recipe_rom_t recipe_id_decode(
             r.meta.writes_flags = 1'd1;
             r.early = 3'd1;
         end
-        6'd33: begin  // 0FC
+        6'd32: begin  // 0FC
             r.meta.hardwired = 1'd1;
             r.meta.multi_ustep = 1'd1;
             r.meta.commit_sel = 3'd2;
@@ -214,7 +207,7 @@ function automatic recipe_rom_t recipe_id_decode(
             r.meta.writes_flags = 1'd1;
             r.early = 3'd1;
         end
-        6'd34: begin  // 102
+        6'd33: begin  // 102
             r.meta.hardwired = 1'd1;
             r.meta.multi_ustep = 1'd1;
             r.meta.commit_sel = 3'd2;
@@ -224,7 +217,7 @@ function automatic recipe_rom_t recipe_id_decode(
             r.meta.writes_flags = 1'd1;
             r.early = 3'd1;
         end
-        6'd35: begin  // 019
+        6'd34: begin  // 019
             r.meta.hardwired = 1'd1;
             r.meta.multi_ustep = 1'd1;
             r.meta.commit_sel = 3'd3;
@@ -232,7 +225,7 @@ function automatic recipe_rom_t recipe_id_decode(
             r.meta.uses_ea = 1'd1;
             r.early = 3'd3;
         end
-        6'd36: begin  // 09F
+        6'd35: begin  // 09F
             r.meta.hardwired = 1'd1;
             r.meta.multi_ustep = 1'd1;
             r.meta.commit_sel = 3'd3;
@@ -240,7 +233,7 @@ function automatic recipe_rom_t recipe_id_decode(
             r.meta.uses_ea = 1'd1;
             r.early = 3'd7;
         end
-        6'd37: begin  // 1E8 1F0
+        6'd36: begin  // 1E8 1F0
             r.meta.hardwired = 1'd1;
             r.meta.multi_ustep = 1'd1;
             r.meta.commit_sel = 3'd4;
@@ -248,7 +241,7 @@ function automatic recipe_rom_t recipe_id_decode(
             r.meta.writes_srcreg = 1'd1;
             r.early = 3'd1;
         end
-        6'd38: begin  // 1EB 1F3
+        6'd37: begin  // 1EB 1F3
             r.meta.hardwired = 1'd1;
             r.meta.multi_ustep = 1'd1;
             r.meta.commit_sel = 3'd4;
@@ -256,7 +249,7 @@ function automatic recipe_rom_t recipe_id_decode(
             r.meta.writes_srcreg = 1'd1;
             r.early = 3'd3;
         end
-        6'd39: begin  // 075
+        6'd38: begin  // 075
             r.meta.hardwired = 1'd1;
             r.meta.multi_ustep = 1'd1;
             r.meta.commit_sel = 3'd5;

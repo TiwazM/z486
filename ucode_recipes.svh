@@ -368,7 +368,7 @@ function automatic recipe_meta_t recipe_metadata(input dec_entry_t e);
             end
             12'h075: begin
                 r.hardwired = 1'b1; r.multi_ustep = 1'b1;
-                if (e.data32) r.commit_sel = RECIPE_COMMIT_ESP;
+                r.commit_sel = RECIPE_COMMIT_ESP;
                 r.uses_ea = 1'b1; r.br_rel = 1'b1;
             end
             12'h072: begin

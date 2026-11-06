@@ -19,6 +19,7 @@ tests/ucode*.hex
 tests/pla_entry_rom.hex
 tests/obj_dir_timing/
 tests/x87_timing_out/
+tests/int_timing_out*/
 tests/pla_*.hex
 tests/obj_dir_*/
 tests/singlestep_result.txt

@@ -425,9 +425,6 @@ always_ff @(posedge clk) begin
             branch_ustep_r <= issue_hardwired &&
                 ((d2_kind == RECIPE_EARLY_BRANCH) ||
                  (issue_instr.rel_branch_kind == REL_BRANCH_CALL)) &&
-                // A 16-bit CALL pushes a 16-bit return address in microcode.
-                (issue_instr.data32 ||
-                 (issue_instr.rel_branch_kind != REL_BRANCH_CALL)) &&
                 (!issue_instr.stack_op ||
                  (issue_instr.rel_branch_kind == REL_BRANCH_CALL)) &&
                 (!issue_recipe.jcc || !jcc_unsafe);

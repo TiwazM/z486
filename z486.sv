@@ -228,6 +228,7 @@ wire         d2_vipt_load;
 wire         d2_vipt_pipe_ready;
 wire         d2_vipt_pop;
 wire         d2_vipt_ret;
+wire         d2_ret_predictable;
 wire         d2_vipt_rmw;
 wire         d2_vipt_rmw_candidate;
 wire         vipt_issue_load;
@@ -283,6 +284,16 @@ wire ds_flat   = desc_cache[SEG_DS].G && (&desc_cache[SEG_DS].limit) &&
                  (desc_cache[SEG_DS].seg_type[3] || !desc_cache[SEG_DS].seg_type[2]);
 wire ss_flat32 = desc_cache[SEG_SS].G && desc_cache[SEG_SS].D_B && (&desc_cache[SEG_SS].limit) &&
                  (desc_cache[SEG_SS].seg_type[3] || !desc_cache[SEG_SS].seg_type[2]);
+// A segment whose limit reaches FFFFh (not expand-down) holds every 16-bit
+// offset. With a 16-bit SS (SP) and CS both so, a 16-bit RET in real or V86
+// mode can fault only on the word that straddles SP=FFFFh.
+function automatic logic limit_full16(input seg_desc_t d);
+    limit_full16 = (d.G ? ((d.limit[19:4] != 16'd0) || (&d.limit[3:0]))
+                        : ((d.limit[19:16] != 4'd0) || (&d.limit[15:0]))) &&
+                   (d.seg_type[3] || !d.seg_type[2]);
+endfunction
+wire ss_cs_full16 = !desc_cache[SEG_SS].D_B && limit_full16(desc_cache[SEG_SS]) &&
+                    limit_full16(desc_cache[SEG_CS]);
 // Segments a direct load may read without the microcode's segment check:
 // data, or readable code (a null selector loads type 0 with S=0, which an
 // access must #GP). Indexed as desc_cache: ES CS SS DS FS GS.
@@ -972,7 +983,7 @@ wire        d2_is_call = !i_bus.has_0f &&
                           ((i_bus.opcode == 8'hFF) && (i_bus.modrm[5:3] == 3'd2)));
 wire [31:0] call_return_sum = EIP + {27'd0, i_bus.length};
 wire [31:0] call_return = i_bus.data32 ? call_return_sum : {16'h0, call_return_sum[15:0]};
-wire        d2_ret_pred = d2_vipt_ret && rsb_valid[rsb_top_r];
+wire        d2_ret_pred = d2_ret_predictable && rsb_valid[rsb_top_r];
 wire        ret_issue = vipt_issue_load && d2_vipt_ret;
 always_ff @(posedge clk) begin
     if (!reset_n) begin
@@ -1002,10 +1013,14 @@ assign pf_spec_req = d2_resident && d2_push &&
                      ((i_bus.rel_branch_kind != REL_BRANCH_NONE) || d2_ret_pred) &&
                      !hardwired_off && !d2_spec_sent_r && !eip_write_now &&
                      !(pf_spec_owner_r && !spec_owner_release);
-// A RET checks its prediction when its probe resolves in EX.
+// A RET checks its prediction when its probe resolves in EX. A 16-bit RET's
+// target is the word in its lane, zero-extended.
+wire [31:0] ret_ex_word = dcache_vipt_resolve_data >> {vipt_load_ex_r.lane, 3'b000};
+wire [31:0] ret_ex_target = (vipt_load_ex_r.mem_size == 2'd1) ? {16'd0, ret_ex_word[15:0]}
+                                                               : dcache_vipt_resolve_data;
 wire        ret_pred_wrong = vipt_load_ex_r.valid && vipt_load_ex_probed_r &&
                              vipt_load_ex_r.is_ret &&
-                             (dcache_vipt_resolve_data != ret_pred_r);
+                             (ret_ex_target != ret_pred_r);
 always_ff @(posedge clk) begin
     if (!reset_n || q_flush || i_issue || interrupt_entry || any_fault || eip_write_now)
         d2_spec_sent_r <= 1'b0;
@@ -1033,7 +1048,7 @@ always_ff @(posedge clk) begin
         // redirects from microcode, unchecked against the prediction).
         if (i_issue)
             pf_spec_owner_r <= ((d2_spec_sent_r && !eip_write_now) || pf_spec_req) &&
-                               (!d2_vipt_ret || d2_vipt_load);
+                               (!d2_ret_predictable || d2_vipt_load);
         // A RET whose prediction was wrong, or whose probe missed (its
         // redirect waits for paging), gives up the line.
         if (q_flush || interrupt_entry || any_fault || vipt_load_slow_busy || ret_pred_wrong)
@@ -2042,6 +2057,7 @@ data_access data_access_inst (
     .vm(vm),
     .seg_gp_fault(seg_gp_fault),
     .ss_flat32(ss_flat32),
+    .ss_cs_full16(ss_cs_full16),
     .seg_readable(seg_readable),
     // Data unit: load writeback and operands
     .forwarded_esp(forwarded_esp),
@@ -2077,6 +2093,7 @@ data_access data_access_inst (
     .d2_vipt_pipe_ready(d2_vipt_pipe_ready),
     .d2_vipt_pop(d2_vipt_pop),
     .d2_vipt_ret(d2_vipt_ret),
+    .d2_ret_predictable(d2_ret_predictable),
     .d2_vipt_rmw(d2_vipt_rmw),
     .d2_vipt_rmw_candidate(d2_vipt_rmw_candidate),
     .vipt_issue_load(vipt_issue_load),
