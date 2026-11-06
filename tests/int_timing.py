@@ -60,6 +60,17 @@ T("CMP + JNE taken", [], rep([f"cmp {A}, {B}\n  jne 1f\n1:"], 8), n=32)
 T("CMP + JE not taken", [], rep([f"cmp {A}, {B}\n  je 1f\n1:"], 8), n=32)
 T("SHL r,1", [], rep([f"shl {A}, 1"], 8), n=32)
 T("SHL r,4", [], rep([f"shl {A}, 4"], 8), n=32)
+T("SHL r,4 (three registers)", [], rep([f"shl {A}, 4", f"shl {B}, 4", f"shl {D}, 4"], 3), n=32)
+T("SHL r,4 + ADD r,r (other)", [], rep([f"shl {A}, 4", f"add {D}, {B}"], 4), n=32)
+T("SHR r,1 (three registers)", [], rep([f"shr {A}, 1", f"shr {B}, 1", f"shr {D}, 1"], 3), n=32)
+T("CMP r,m + ADD r,r", setup, rep([f"cmp {A}, {M0}", f"add {D}, {B}"], 4), n=32)
+# The frame zeroes EAX after the setup: compare EDX.
+T("CMP r,m + JNE (not taken)", setup + [f"mov {D}, {M0}"], rep([f"cmp {D}, {M0}\n  jne 1f\n1:"], 8), n=32)
+T("TEST r,m", setup, rep([f"test {A}, {M0}"], 8), n=32)
+T("CMP m,imm8", setup, rep([f"cmp {W} ptr [{SI}], 5"], 8), n=32)
+T("SUB r,m + JNE (not taken)", setup + [f"mov {A}, 0"], rep([f"sub {A}, {M0}\n  jne 1f\n1:", f"mov {A}, {M0}"], 4), n=32)
+T("CMP r,r + JNE (not taken)", [], rep([f"cmp {A}, {A}\n  jne 1f\n1:"], 8), n=32)
+T("MOV r,m + CMP r,r + JNE", setup, rep([f"mov {D}, {M0}\n  cmp {A}, {D}\n  jne 1f\n1:"], 4), n=32)
 
 FUNCS = f"""
   .p2align 4

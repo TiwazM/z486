@@ -673,8 +673,11 @@ always_ff @(posedge clk) begin
     if (reset_n && vipt_issue_load && vipt_load_ex_r.valid &&
         !vipt_load_ex_hit && vipt_load_replay_r.valid)
         $fatal(1, "VIPT replay token overflow");
+    // A CMP r,m writes no register, so it has no destination mask.
     if (reset_n && vipt_load_wb_valid_r &&
-        (vipt_load_wb_dst_onehot_r !== (8'h01 << vipt_load_wb_norm_dst)))
+        (vipt_load_wb_dst_onehot_r !==
+         ((vipt_load_wb_is_alu_r && (vipt_load_wb_alu_op_r == ALU_CMP))
+              ? 8'h00 : (8'h01 << vipt_load_wb_norm_dst))))
         $fatal(1, "VIPT WB destination mask mismatch");
 end
 // synthesis translate_on
@@ -921,7 +924,9 @@ assign d2_vipt_write_size = (d2_vipt_movx || d2_vipt_ret) ? 2'd2
                                                           : i_bus.operand_size;
 wire [2:0] d2_vipt_dst_wide = (d2_vipt_write_size == 2'd0)
                             ? {1'b0, d2_vipt_dst[1:0]} : d2_vipt_dst;
-assign d2_vipt_dst_onehot = 8'h01 << d2_vipt_dst_wide;
+// A CMP r,m (a direct ALU load) writes no register: none is pending.
+wire d2_vipt_cmp = d2_vipt_alu && (i_bus.opcode[5:3] == 3'b111);
+assign d2_vipt_dst_onehot = d2_vipt_cmp ? 8'h00 : (8'h01 << d2_vipt_dst_wide);
 assign d2_vipt_result_kind = !d2_vipt_movx ? LOAD_RESULT_COPY :
     (i_bus.opcode[3] ? LOAD_RESULT_SIGN_EXTEND : LOAD_RESULT_ZERO_EXTEND);
 // MOV AL/eAX,moffs shares MOV r,m's recipe; its address is the immediate.

@@ -236,12 +236,12 @@ always_comb begin
     // Resolve the direct ALU memory-load class in D1. Re-decoding opcode and
     // ModR/M from i_bus put this classification in series with VIPT hit
     // resolution and same-edge chained issue on the microcode-ROM address path.
+    // CMP r,m (3A/3B) is one too: its WB writes the flags and no register.
     handoff_d2.entry.vipt_alu = !handoff_work.entry.has_0f &&
         (handoff_work.entry.opcode[7:6] == 2'b00) &&
         !handoff_work.entry.opcode[2] && handoff_work.entry.opcode[1] &&
         handoff_work.entry.has_modrm &&
-        (handoff_work.entry.modrm[7:6] != 2'b11) &&
-        (handoff_work.entry.opcode[5:3] != 3'b111);
+        (handoff_work.entry.modrm[7:6] != 2'b11);
     // The recipe hazard mask is derived from this registered structural entry
     // during D2. Keeping it out of D1 avoids serializing entry-PLA decode and
     // mask generation on the raw-window-to-skeleton path.

@@ -166,7 +166,7 @@ function automatic logic [7:0] recipe_gpr_read_mask(input dec_entry_t e);
         12'h01D, 12'h01F, 12'h0FC: begin
             mask[dst_idx] = 1'b1; mask[src_idx] = 1'b1;
         end
-        12'h021, 12'h023, 12'h025, 12'h0F9, 12'h105, 12'h1E8, 12'h1F0, 12'h086, 12'h027: mask[dst_idx] = 1'b1;
+        12'h021, 12'h023, 12'h025, 12'h0F9, 12'h105, 12'h1E8, 12'h1F0, 12'h086, 12'h027, 12'h02C: mask[dst_idx] = 1'b1;
         12'h0FF: begin
             mask[dst_idx] = 1'b1; mask[3'd1] = 1'b1;
         end
@@ -321,7 +321,15 @@ function automatic recipe_meta_t recipe_metadata(input dec_entry_t e);
                     r.writes_flags = 1'b1;
                 end
             end
-            12'h02C, 12'h035: begin
+            12'h02C: begin
+                if (!e.has_0f) begin
+                    r.hardwired = 1'b1; r.multi_ustep = 1'b1;
+                    r.uses_ea = 1'b1; r.writes_flags = 1'b1;
+                    // A direct load captures the register in EX.
+                    r.reads_dst = 1'b1;
+                end
+            end
+            12'h035: begin
                 if (!e.has_0f) begin
                     r.hardwired = 1'b1; r.multi_ustep = 1'b1;
                     r.uses_ea = 1'b1; r.writes_flags = 1'b1;

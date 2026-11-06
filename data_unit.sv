@@ -995,7 +995,9 @@ always_ff @(posedge clk) begin
             write_gpr(recipe_shift_write.dst, recipe_shift_data,
                       recipe_shift_write.size);
 
-        if (load_wb_valid && !recipe_commit_cancel)
+        // A CMP r,m commits its flags only.
+        if (load_wb_valid && !recipe_commit_cancel &&
+            !(load_wb_is_alu && (load_wb_alu_op == ALU_CMP)))
             write_gpr(load_wb_dst, load_wb_commit_data, load_wb_size);
 
         // A chained successor may own EX while an older hardwired load's
@@ -1524,7 +1526,7 @@ always_comb begin
             load_wb_arith = 1'b1;
             load_wb_add_cin = eflags_fwd[0];
         end
-        ALU_SUBT: begin
+        ALU_SUBT, ALU_CMP: begin
             load_wb_arith = 1'b1;
             load_wb_sub = 1'b1;
             load_wb_add_b = ~load_wb_data;

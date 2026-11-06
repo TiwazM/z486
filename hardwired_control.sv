@@ -336,7 +336,9 @@ wire pb_b1_from_multi = recipe_state.hardwired && recipe_state.multi_ustep &&
 // A direct load completes in the data pipeline, so its first word is already
 // a dead slot. Its successor may not read the load's M3 ALU result (no WB
 // forwarding) or, after a flag-writing load, the flags.
-wire pbn_load_alu_conf = issue_recipe.writes_flags &&
+// A CMP r,m writes flags and no register.
+wire issue_load_cmp = !issue_instr.has_0f && (issue_instr.opcode[7:1] == 7'b0011101);
+wire pbn_load_alu_conf = issue_recipe.writes_flags && !issue_load_cmp &&
     (pbn_read_mask[issue_load_widx] || pbn_merge_mask[issue_load_widx]);
 // A direct POP writes ESP in its first cycle; a stack successor takes the
 // forwarded value, but an ESP base or index waits for the register.
