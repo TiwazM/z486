@@ -2685,7 +2685,12 @@ always_ff @(posedge clk) begin
                             uc_dest == DEST_IP || uc_dest == DEST_USTEP_RPTI_EIP)) begin
         // Microcode destination write to EIP.
         if (uc_dest == DEST_EIP || uc_dest == DEST_USTEP_RPTI_EIP) begin
-            if (D)
+            // A restart (fault, debug trap, REP) puts back TMPeIP, the
+            // instruction's own EIP, already sized for its own CS. Mid-way
+            // through a control transfer the CS descriptor cache (so D) may
+            // already hold the target's (INT 31h to a 16-bit DPMI host,
+            // faulting on the push): masking by that D cut EIP to 16 bits.
+            if (D || uc_source_shift == SRC_TMPeIP)
                 EIP <= eip_source_value;
             else
                 EIP <= {16'h0, eip_source_value[15:0]};
