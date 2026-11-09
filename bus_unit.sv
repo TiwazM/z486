@@ -107,7 +107,10 @@ assign icache_read_pending = (icache_rd_pending != 8'd0);
 // DSP command lets DMA consume it.  VGA memory already bypasses the posted
 // queue, so direct VGA accesses remain mutually ordered without draining
 // unrelated normal-RAM stores first.
-wire direct_req_ordered = dcache_req_is_vga_mem || dcache_stores_drained;
+// A device MMIO window above 128 MB (zSST's BAR) is a device page too; it
+// keeps waiting for the posted stores as before.
+wire direct_req_ordered = (dcache_req_is_vga_mem && !dcache_req_is_device_mmio) ||
+                          dcache_stores_drained;
 wire ext_direct_req = dcache_direct_req && direct_req_ordered &&
                       !direct_rd_pending &&
                       !dcache_read_pending && !icache_read_pending;

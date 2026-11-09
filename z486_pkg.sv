@@ -1554,10 +1554,15 @@ function automatic [3:0] resolve_seg_target(input [6:0] dest, input [2:0] seg_se
 endfunction
 
 // Device (uncached, direct) physical pages: the VGA window A0000-BFFFF and
-// the 4 MB SVGA linear framebuffer at 0F800000 (248 MB, where ao486 exposes
-// its DDR3 framebuffer and UniVBE finds the ET4000/W32 linear aperture).
+// everything from 128 MB up. The L1 tags hold 27 address bits
+// (PHYS_ADDR_BITS, RAM is at most 128 MB), so a cached access above that
+// aliases RAM below it: a store to a PCI BAR (zSST at E0000000) updated the
+// cached RAM line at the same low 27 bits (Glide's dAdY write cleared
+// IVT[1Ch]). This covers the 4 MB SVGA linear framebuffer at 0F800000 too
+// (248 MB, where ao486 exposes its DDR3 framebuffer and UniVBE finds the
+// ET4000/W32 linear aperture).
 function automatic logic is_device_page(input logic [19:0] pfn);
-    is_device_page = (pfn[19:5] == 15'h5) || (pfn[19:10] == 10'h03E);
+    is_device_page = (pfn[19:5] == 15'h5) || (pfn[19:15] != 5'h0);
 endfunction
 
 endpackage
