@@ -151,6 +151,18 @@ logic [31:0] br_rdata;
 typedef enum logic [1:0] {ST_IDLE, ST_CMD, ST_READ, ST_DONE} st_state_t;
 st_state_t   st_state;
 logic        direct_st_r;          // The issued instruction took the store or status path.
+// A store that would have to wait for the x87 (busy without queue_safe, or a register command
+// still in the bridge) does not fall back to its 386 routine at once: that routine sends the
+// command before it writes, so the x87 converts and pops, and a page fault on the write then
+// restarts the store on a popped stack (CWSDPMI maps a page on its first touch: Chris's 3D
+// Benchmark's FSTP m32 two instructions after FSUBP, DJGPP's control word 037Ah, stack
+// underflow). The overlay's first word holds instead (st_wait_r, as WAIT's word does) until the
+// x87 is quiet, then the store goes direct, its destination checked before the x87 sees it,
+// or, with an unmasked exception now pending, runs untaken for its routine to report it. On a
+// long operation it holds while the x87 runs plain arithmetic, else at most 32 cycles in a row,
+// then runs untaken as before (the routine polls BUSY# and takes interrupts).
+logic        st_wait_r;            // The issued store's first word holds for the x87.
+logic  [4:0] st_slow_r;            // Held cycles in a row the x87 ran no plain operation.
 logic        st_status_r;          // ...a status read (FNSTSW, FNSTCW).
 logic        st_control_r;         // ...of the control word (FNSTCW).
 logic        x87_quiet;            // No x87 command in the bridge, queued or running.
@@ -222,7 +234,8 @@ wire         direct_release = direct_valid && direct_ready;
 assign load_commit = direct_release && !op_ctrl_r;
 
 assign direct_mem_req = direct_active && !direct_issued_r && !direct_data_valid_r;
-assign store_hold = store_word && ((direct_st_r && (st_state != ST_DONE)) || wait_hold_r);
+assign store_hold = (store_word && ((direct_st_r && (st_state != ST_DONE)) || wait_hold_r)) ||
+                    st_wait_r;
 assign store_opr_commit = st_commit_r;
 assign store_record = st_commit_r && (st_state == ST_DONE) && !st_status_r;
 assign store_opr_data = st_part0_r;
@@ -383,6 +396,8 @@ always_ff @(posedge clk) begin
         wait_hold_r         <= 1'b0;
         wait_go_r           <= 1'b0;
         wait_slow_r         <= 5'd0;
+        st_wait_r           <= 1'b0;
+        st_slow_r           <= 5'd0;
     end else begin
         if (direct_release) begin
             direct_active       <= 1'b0;
@@ -422,6 +437,17 @@ always_ff @(posedge clk) begin
         // Its RNI is that one word's.
         if (store_exec)
             wait_go_r <= 1'b0;
+        // The held store: when the x87 is quiet, direct with nothing pending, else untaken (its
+        // routine reports the exception); untaken too after 32 cycles of a long operation.
+        if (st_wait_r) begin
+            if (wait_quiet) begin
+                st_wait_r   <= 1'b0;
+                direct_st_r <= error_n && direct_allowed;
+            end else if (st_slow_r == 5'd31) begin
+                st_wait_r <= 1'b0;
+            end
+            st_slow_r <= queue_short ? 5'd0 : st_slow_r + 5'd1;
+        end
 
         st_commit_r <= 1'b0;
         x87_quiet_r <= x87_quiet && !dcmd_pending_r;
@@ -508,6 +534,10 @@ always_ff @(posedge clk) begin
                                  error_n && (l_status ||
                                              (l_store && (busy_n || queue_safe) &&
                                               !dcmd_pending_r));
+            st_wait_r           <= ENABLE_X87 && esc_candidate && direct_allowed &&
+                                 error_n && l_store &&
+                                 !((busy_n || queue_safe) && !dcmd_pending_r);
+            st_slow_r           <= 5'd0;
             st_status_r         <= l_status;
             st_control_r        <= l_esc == 3'd1;
             st_state            <= (ENABLE_X87 && esc_candidate && direct_allowed &&
@@ -566,6 +596,7 @@ always_ff @(posedge clk) begin
             op_post_r           <= 1'b0;
             wait_hold_r         <= 1'b0;
             wait_go_r           <= 1'b0;
+            st_wait_r           <= 1'b0;
         end
     end
 end
