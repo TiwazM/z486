@@ -43,6 +43,7 @@ module data_access
     input  logic                    vipt_tlb_hit,
     input  logic                    vipt_tlb_is_vga_mem,
     input  logic [31:0]             vipt_tlb_phys_addr,
+    input  logic [31:0]             vipt_tlb_frame_addr,
     input  logic                    vipt_tlb_user,
     input  logic                    vipt_tlb_writable,
     output logic                    sidecar_bg_pre,
@@ -328,6 +329,11 @@ wire [31:0] vipt_resolve_linear = rd_fast_valid_r
                                 : vipt_load_ex_r.linear_addr;
 wire [31:0] vipt_resolve_phys = vipt_page_enabled
                               ? vipt_tlb_phys_addr : vipt_resolve_linear;
+// The dcache's VIPT resolve uses its address only while dcache_vipt_resolve_valid,
+// which with paging on requires the TLB hit: then the preread entry's frame is
+// the translation, and the tag compare need not wait for the match to select it.
+wire [31:0] vipt_resolve_phys_early = vipt_page_enabled
+                                    ? vipt_tlb_frame_addr : vipt_resolve_linear;
 wire vipt_load_ex_contained =
     (vipt_load_ex_r.mem_size == 2'd0) ||
     ((vipt_load_ex_r.mem_size == 2'd1) &&
@@ -451,7 +457,14 @@ assign dcache_vipt_resolve_valid = (((vipt_load_ex_r.valid &&
                                     !vipt_tlb_is_vga_mem);
 assign ucrd_hit = ucrd_valid_r && ucrd_translation_ok && !vipt_tlb_is_vga_mem &&
                 dcache_vipt_resolve_hit;
-assign dcache_vipt_resolve_phys_addr = vipt_resolve_phys;
+assign dcache_vipt_resolve_phys_addr = vipt_resolve_phys_early;
+// synthesis translate_off
+always @(posedge clk)
+    if (reset_n && dcache_vipt_resolve_valid &&
+        (vipt_resolve_phys_early !== vipt_resolve_phys))
+        $fatal(1, "dcache VIPT resolve address %08x differs from the translation %08x",
+               vipt_resolve_phys_early, vipt_resolve_phys);
+// synthesis translate_on
 // A plain or ALU direct load, or a microcode read, may fill straight from its
 // probe on a miss; RET, RMW and x87 reads keep the paging path.
 assign dcache_vipt_resolve_fill = !vipt_load_slow_busy &&

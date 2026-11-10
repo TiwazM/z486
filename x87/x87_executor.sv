@@ -102,6 +102,7 @@ logic [29:0] mul_p01_tail, mul_p10_tail, mul_p11_cross;
 logic [5:0] mul_p11_top;
 logic [57:0] mul_p11_r;
 logic [28:0] mul_limb1_r;
+logic [26:0] mul_p00_lo_r;  // mul_p00[26:0], taken at the prepare step (timing: no DSP in the round)
 logic [30:0] mul_limb2_r;
 logic [28:0] mul_limb1_sum;
 logic [30:0] mul_limb2_sum;
@@ -295,7 +296,7 @@ assign mul_top_sum = {1'b0, mul_p11_r[57:27]} +
 assign mul_product = {mul_top_sum[30:0],
                       mul_limb2_r[26:0],
                       mul_limb1_r[26:0],
-                      mul_p00[26:0]};
+                      mul_p00_lo_r};
 
 assign divsqrt_iterate = (uop.engine == X87_ENGINE_DIV_ITERATE) ||
                          (uop.engine == X87_ENGINE_SQRT_ITERATE);
@@ -1944,10 +1945,14 @@ end
 
 // Capture the corrected high product in the existing prepare step: it is
 // first consumed by the following accumulate step, so no cycle is added.
+// The low limb of the lowest product too: the round step's sticky bit and
+// increment otherwise start at the DSPs (main_clk's x87 paths). The operands
+// stay put from prepare to round (checked below with the whole product).
 always_ff @(posedge clk) begin
     if (reset) begin
         mul_p11_r <= 58'd0;
         mul_limb1_r <= 29'h0;
+        mul_p00_lo_r <= 27'h0;
         mul_limb2_r <= 31'h0;
         mul_exp_r <= 15'h0;
         mul_result_sign_r <= 1'b0;
@@ -1971,6 +1976,7 @@ always_ff @(posedge clk) begin
             mul_p11_r <= mul_p11;
             mul_exp_r <= operand.exp + operand_b.exp - 15'h3fff;
             mul_limb1_r <= mul_limb1_sum;
+            mul_p00_lo_r <= mul_p00[26:0];
         end
     end
 end

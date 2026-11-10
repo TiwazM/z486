@@ -27,6 +27,7 @@ module paging_tlb
     input        [31:0] vipt_linear_addr,
     output reg          vipt_hit,
     output reg   [31:0] vipt_physical_addr,
+    output       [31:0] vipt_frame_addr,   // the entry's frame + offset, match or not
     output reg          vipt_writable,
     output reg          vipt_user,
     output reg          vipt_dirty,
@@ -215,6 +216,10 @@ wire vipt_match = !vipt_hazard_r && !vipt_scrub &&
                   (vipt_tlb_q[39:36] == vipt_epoch) &&
                   (vipt_tlb_q[35:24] == vipt_linear_r[31:20]);
 assign vipt_is_vga_mem = vipt_match && vipt_tlb_q[0];
+// The preread entry's frame with the offset, before the match selects it: for
+// lookups that are only used with a hit (the dcache's VIPT resolve), so the
+// tag compare need not wait for the match (main_clk's TLB-to-issue paths).
+assign vipt_frame_addr = {vipt_tlb_q[23:4], vipt_linear_r[11:0]};
 
 always_comb begin
     vipt_hit = vipt_match;

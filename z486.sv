@@ -434,6 +434,7 @@ wire        dcache_vipt_fill_resp_valid;
 wire [31:0] dcache_vipt_fill_resp_data;
 wire        vipt_tlb_hit;
 wire [31:0] vipt_tlb_phys_addr;
+wire [31:0] vipt_tlb_frame_addr;      // the same before the TLB match selects it
 wire        vipt_tlb_writable;
 wire        vipt_tlb_user;
 wire        vipt_tlb_dirty;
@@ -2022,6 +2023,7 @@ data_access data_access_inst (
     .vipt_tlb_hit(vipt_tlb_hit),
     .vipt_tlb_is_vga_mem(vipt_tlb_is_vga_mem),
     .vipt_tlb_phys_addr(vipt_tlb_phys_addr),
+    .vipt_tlb_frame_addr(vipt_tlb_frame_addr),
     .vipt_tlb_user(vipt_tlb_user),
     .vipt_tlb_writable(vipt_tlb_writable),
     .sidecar_bg_pre(sidecar_bg_pre),
@@ -2192,6 +2194,7 @@ paging_unit paging_inst (
     .vipt_fallback      (paging_owned_submit),
     .vipt_tlb_hit       (vipt_tlb_hit),
     .vipt_tlb_phys_addr (vipt_tlb_phys_addr),
+    .vipt_tlb_frame_addr(vipt_tlb_frame_addr),
     .vipt_tlb_writable  (vipt_tlb_writable),
     .vipt_tlb_user      (vipt_tlb_user),
     .vipt_tlb_dirty     (vipt_tlb_dirty),
