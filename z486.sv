@@ -2191,6 +2191,11 @@ paging_unit paging_inst (
     .vipt_preread       (dcache_vipt_probe_valid || st_tlb_pre || sidecar_bg_pre),
     .vipt_linear_addr   (st_tlb_pre ? issue_mem_linear :
                          sidecar_bg_pre ? ind_linear : vipt_probe_linear),
+    .vipt_index_st      (issue_mem_linear[19:12]),
+    .vipt_index_bg      (ind_linear[19:12]),
+    .vipt_index_probe   (vipt_probe_linear[19:12]),
+    .vipt_sel_st        (st_tlb_pre),
+    .vipt_sel_bg        (sidecar_bg_pre),
     .vipt_fallback      (paging_owned_submit),
     .vipt_tlb_hit       (vipt_tlb_hit),
     .vipt_tlb_phys_addr (vipt_tlb_phys_addr),

@@ -25,6 +25,14 @@ module paging_tlb
     // authoritative four-way TLB and page walker.
     input               vipt_preread,
     input        [31:0] vipt_linear_addr,
+    // The same address's three candidates' table indices and the late selects
+    // that choose among them (z486.sv): the table is read at all three and the
+    // entry chosen after (not on Quartus), so the selects skip the RAM's read address.
+    input         [7:0] vipt_index_st,     // vipt_sel_st: the store preread's
+    input         [7:0] vipt_index_bg,     // vipt_sel_bg: the background preread's
+    input         [7:0] vipt_index_probe,  // else: the probe's
+    input               vipt_sel_st,
+    input               vipt_sel_bg,
     output reg          vipt_hit,
     output reg   [31:0] vipt_physical_addr,
     output       [31:0] vipt_frame_addr,   // the entry's frame + offset, match or not
@@ -169,7 +177,17 @@ reg [VIPT_TLB_INDEX_BITS-1:0] vipt_scrub_index;
 wire vipt_scrub_write = vipt_scrub && !invalidate_page && !update_valid &&
                         !vipt_refill_write;
 // {epoch, VPN tag[19:8], PFN[19:0], writable, user, dirty, VGA}
+`ifndef Z486_ALTERA
+// Three read copies of the table in LUT RAM (one write port, as before); on
+// Quartus the one block RAM read, as before.
+`Z486_DISTRIBUTED_RAM reg [39:0] vipt_tlb [0:VIPT_TLB_ENTRIES-1];
+wire [39:0] vipt_tlb_read = vipt_sel_st ? vipt_tlb[vipt_index_st] :
+                            vipt_sel_bg ? vipt_tlb[vipt_index_bg] :
+                                          vipt_tlb[vipt_index_probe];
+`else
 `Z486_BLOCK_RAM_NO_RW_CHECK reg [39:0] vipt_tlb [0:VIPT_TLB_ENTRIES-1];
+wire [39:0] vipt_tlb_read = vipt_tlb[vipt_preread_index];
+`endif
 reg [39:0] vipt_tlb_q;
 wire       vipt_mutation = invalidate_all || invalidate_page || update_valid ||
                            vipt_refill_write || vipt_scrub_write;
@@ -182,7 +200,7 @@ always_ff @(posedge clk) begin
         // authoritative lookup; avoiding the live index compares keeps D2 EA
         // formation out of this register input.
         vipt_hazard_r <= vipt_mutation;
-        vipt_tlb_q <= vipt_tlb[vipt_preread_index];
+        vipt_tlb_q <= vipt_tlb_read;
     end else if (vipt_mutation) begin
         // A held preread no longer reflects the table.
         vipt_hazard_r <= 1'b1;
@@ -273,6 +291,12 @@ always_ff @(posedge clk) begin
         vipt_valid_ref[vipt_refill_index] <= 1'b1;
     if (vipt_preread)
         vipt_valid_ref_q <= vipt_valid_ref[vipt_preread_index];
+    // The selected candidate's index is the preread address's.
+    if (reset_n && vipt_preread &&
+        ((vipt_sel_st ? vipt_index_st : vipt_sel_bg ? vipt_index_bg : vipt_index_probe)
+         !== vipt_preread_index))
+        $fatal(1, "sidecar preread index candidates differ from the address %08x",
+               vipt_linear_addr);
     if (reset_n && vipt_match && !vipt_valid_ref_q)
         $fatal(1, "sidecar hit on an entry the valid-bit reference rejects (linear %08x)",
                vipt_linear_r);

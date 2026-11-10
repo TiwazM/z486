@@ -381,7 +381,23 @@ end
 
 wire [63:0] k1q_preread_nf = d1_window(queue_nf, k1p_preread_word, k1p_preread_boff);
 wire [63:0] k1q_preread_next = q_flush ? k1q_flush_next : k1q_preread_nf;
-assign k1q_early = k1q_preread_next;
+// The decoder's entry/group ROM addresses take the early window's opcode and
+// ModR/M bytes only. Their own two-byte window, with its own copy of the
+// cursor (a separate hierarchy so synthesis keeps it apart), keeps them off
+// the select of the 64-bit k1q_next window (fanout 82 on main_clk's decode
+// path). The upper bits are the shared window's, for the checks only.
+wire [15:0] k1q_rom_nf;
+prefetch_rom_window rom_window_inst (
+    .q        (queue_nf),
+    .word_base(k1p_word),
+    .sum      (k1p_preread_sum),
+    .seed_now (seed_now),
+    .seed_delta(seed_delta),
+    .seed_boff(pf_fetch_addr[1:0]),
+    .win      (k1q_rom_nf)
+);
+assign k1q_early = {k1q_preread_next[63:16],
+                    q_flush ? k1q_flush_next[15:0] : k1q_rom_nf};
 
 // q_flush gives both cursor views the same redirected origin. Otherwise the
 // real cursor advances exactly when structural preread and committed advance
@@ -647,4 +663,35 @@ always_ff @(posedge clk or negedge reset_n) begin
     end
 end
 
+endmodule
+
+// The prefetch's early two-byte window (k1q_early[15:0]) for the decoder's ROM
+// addresses: k1p_preread_word/boff and d1_window's low 16 bits, computed again.
+(* keep_hierarchy = "yes" *)
+module prefetch_rom_window (
+    input  logic [255:0] q,          // queue, slot k at [32k +: 32]
+    input  logic [3:0]   word_base,  // k1p_word
+    input  logic [3:0]   sum,        // k1p_preread_sum
+    input  logic         seed_now,
+    input  logic [3:0]   seed_delta,
+    input  logic [1:0]   seed_boff,  // pf_fetch_addr[1:0]
+    output logic [15:0]  win
+);
+    logic [3:0]  word;
+    logic [1:0]  boff;
+    logic [31:0] cur, nxt;
+    always_comb begin
+        word = word_base + {2'b00, sum[3:2]};
+        boff = sum[1:0];
+        if (seed_now) begin
+            word = word + seed_delta;
+            boff = seed_boff;
+        end
+        cur = q[{word[2:0], 5'b0} +: 32];
+        nxt = q[{3'(word[2:0] + 3'd1), 5'b0} +: 32];
+        win = boff == 2'd0 ? cur[15:0] :
+              boff == 2'd1 ? cur[23:8] :
+              boff == 2'd2 ? cur[31:16] :
+                             {nxt[7:0], cur[31:24]};
+    end
 endmodule
