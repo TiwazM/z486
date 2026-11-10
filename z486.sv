@@ -1487,7 +1487,7 @@ function automatic [7:0] gpr_dest_mask(input [6:0] dst);
             gpr_dest_mask = 8'h80;
         DEST_DSTREG:
             gpr_dest_mask = gpr_wr_expand(i.dst_reg_sel);
-        DEST_SRCREG, DEST_USTEP_BSWAP:
+        DEST_SRCREG, DEST_USTEP_BSWAP, DEST_USTEP_BSF, DEST_USTEP_BSR:
             gpr_dest_mask = gpr_wr_expand(i.src_reg_sel);
         DEST_USTEP_ALU:
             gpr_dest_mask = gpr_wr_expand(i.dst_reg_sel);

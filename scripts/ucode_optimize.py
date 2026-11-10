@@ -35,6 +35,8 @@ DEST_USTEP_X87_STORE = 0x71 # Optimizer-owned: x87 store command and result read
 DEST_USTEP_X87_OPERAND = 0x72 # Optimizer-owned: OPR_R is the next x87 operand part.
 DEST_USTEP_X87_POST = 0x73  # Optimizer-owned: OPR_R is the last part; post the load.
 DEST_USTEP_X87_NEXT = 0x74  # Optimizer-owned: OPR_R takes the next x87 result part.
+DEST_USTEP_BSF = 0x75       # Optimizer-owned: SRCREG = lowest set bit of TMPB, ZF.
+DEST_USTEP_BSR = 0x76       # Optimizer-owned: SRCREG = highest set bit of TMPB, ZF.
 DEST_USTEP_ALU = 0x7E       # Optimizer-owned: commit this word's ALU result to DSTREG.
 DEST_USTEP_BSWAP = 0x7C     # Optimizer-owned: byte-swap SRCREG into itself.
 ALUJMP_JDESCA = 0x20        # Optimizer-owned: jump if descriptor A bit is set.
@@ -565,6 +567,24 @@ PATCHES = [
     # write part of the microcode word so normal destination handling owns it.
     Patch(0x182, "BSR completion: TMPC -> SRCREG with CLZF/RNI",
           fields=dict(src=SRC_TMPC, dst=DEST_SRCREG)),
+
+    # BSF and BSR take a priority encoder in place of the 386's bit-by-bit
+    # loops (10 + 3n clocks; CACHECHK times a BSR for its clock). The
+    # routines' first words still put the operand in TMPB: 168 (BSF r), 179
+    # (BSF m, the delay slot of 178's jump), 17A (BSR r), 186 (BSR m, the
+    # delay slot of 185's). The word they reach next, 169 or 17B, writes the
+    # index of TMPB's lowest or highest set bit (within the operand size) to
+    # SRCREG and clears ZF, or, with no bit set, leaves SRCREG as the 386
+    # does and sets ZF; and retires. Its RNI delay slot is blank. The loops
+    # after it (16B-176, 17D-183, with 182 above) are no longer reached.
+    Patch(0x169, "BSF: SRCREG = lowest set bit of TMPB, ZF, RNI",
+          copy_from=0x20F, fields=dict(dst=DEST_USTEP_BSF)),
+    Patch(0x16A, "BSF: RNI delay slot",
+          copy_from=0x030),
+    Patch(0x17B, "BSR: SRCREG = highest set bit of TMPB, ZF, RNI",
+          copy_from=0x20F, fields=dict(dst=DEST_USTEP_BSR)),
+    Patch(0x17C, "BSR: RNI delay slot",
+          copy_from=0x030),
 
     # RPTI's EIP restore restarts an interrupted repeat instruction. Give the
     # write its own semantic destination instead of recognizing routine

@@ -176,6 +176,24 @@ logic [31:0] load_wb_dst_base_r;
 logic [31:0] load_wb_forward_data_r;
 
 logic [31:0] tmpb, tmpd, tmpe, tmpf, tmph;
+// BSF/BSR (DEST_USTEP_BSF/BSR): the index of TMPB's lowest/highest set bit
+// within the operand size, from the register the routine's previous word
+// wrote; with no bit set the destination is left and ZF set.
+logic [31:0] bscan_value;
+logic        bscan_zero;
+logic  [4:0] bsf_index, bsr_index;
+always_comb begin
+    bscan_value = (op_size == 2'd1) ? {16'h0, tmpb[15:0]} : tmpb;
+    bscan_zero  = (bscan_value == 32'h0);
+    bsf_index   = 5'd0;
+    for (int b = 31; b >= 0; b--)
+        if (bscan_value[b])
+            bsf_index = 5'(b);
+    bsr_index   = 5'd0;
+    for (int b = 0; b < 32; b++)
+        if (bscan_value[b])
+            bsr_index = 5'(b);
+end
 logic [31:0] csopcd, fsveip, oproff;
 logic [2:0] src_reg_sel_r;           // EX-local copies of issued GPR selectors
 logic [2:0] dst_reg_sel_r;
@@ -1044,6 +1062,13 @@ always_ff @(posedge clk) begin
                               {dest_value[7:0], dest_value[15:8],
                                dest_value[23:16], dest_value[31:24]}, 2'd2);
 
+                DEST_USTEP_BSF:
+                    if (!bscan_zero)
+                        write_gpr(src_reg_sel_r, {27'd0, bsf_index}, op_size);
+                DEST_USTEP_BSR:
+                    if (!bscan_zero)
+                        write_gpr(src_reg_sel_r, {27'd0, bsr_index}, op_size);
+
                 DEST_USTEP_ALU:
                     if (recipe_state.hardwired &&
                         !recipe_commit_cancel)
@@ -1373,6 +1398,9 @@ always_ff @(posedge clk) begin
                 end
                 default: ;
             endcase
+
+            if (dest == DEST_USTEP_BSF || dest == DEST_USTEP_BSR)
+                eflags[6] <= bscan_zero;
 
             if (dest == DEST_FLAGSL)
                 eflags[7:0] <= (dest_value[7:0] & 8'hD5) | 8'h02;
