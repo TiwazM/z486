@@ -496,7 +496,11 @@ always @(posedge clk)
 // synthesis translate_on
 
 
-// Sequencer predicates are control state, not architectural flags.
+// Sequencer predicates are control state, not architectural flags. Each instruction and
+// each event taken at a boundary (trap, NMI, INTR) starts with them clear: an INTR taken
+// right after an exception's delivery, at the handler's first instruction (a trap gate
+// leaves IF set), must not push that exception's error code (OS/2 Warp 4: #PF, then the
+// RTC's IRQ 8; the IRQ handler's IRETD popped the #PF handler's EIP as CS).
 always_ff @(posedge clk) begin
     if (!reset_n) begin
         misc1_flag <= 1'b0;
@@ -504,7 +508,7 @@ always_ff @(posedge clk) begin
         error_code_flag <= 1'b0;
         interrupt_hw <= 1'b0;
     end else begin
-        if (i_issue && !halted) begin
+        if ((i_issue && !halted) || seq_boundary_redirect.valid) begin
             misc1_flag <= 1'b0;
             misc2_flag <= 1'b0;
             error_code_flag <= 1'b0;
