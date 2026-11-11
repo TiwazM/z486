@@ -258,6 +258,10 @@ reg         early_redirected;
 // Segmentation and protection state shared across the address pipeline.
 reg [15:0] ES = 16'h0000;
 reg [15:0] CS = 16'hF000;           // Reset value
+// CPL is 0 from the CR0 write that sets PE until the next CS load. CS keeps its real-mode value
+// in between, RPL bits included, as on the Intel486: the "unreal mode" sequence (set PE, load
+// data segments, clear PE, no far jump) must come back with CS unchanged (SpeedSys 4.78).
+reg        pe_cpl0 = 1'b0;
 reg [15:0] SS = 16'h0000;
 reg [15:0] DS = 16'h0000;
 reg [15:0] FS = 16'h0000;
@@ -324,7 +328,7 @@ assign dbg_EIP = EIP;
 assign dbg_CS_base = CS_base;
 assign dbg_pe  = pe;
 assign dbg_vm  = vm;
-wire [1:0] cpl = vm ? 2'd3 : !pe ? 2'd0 : CS[1:0];
+wire [1:0] cpl = vm ? 2'd3 : (!pe || pe_cpl0) ? 2'd0 : CS[1:0];
 
 wire [2:0] latched_pf_code;  // Latched page fault error code (for LPCR microcode access)
 wire [31:0] latched_pf_addr;  // Latched faulting linear address (for LPCR microcode access)
@@ -2319,7 +2323,7 @@ protection_unit protection_unit_inst (
     .cs_descriptor_dpl(desc_cache[SEG_CS].DPL),
     .cs_descriptor_exec(desc_cache[SEG_CS].seg_type[3]),
     .cs_descriptor_conforming(desc_cache[SEG_CS].seg_type[2]),
-    .cs_selector_rpl(CS[1:0]),
+    .cs_selector_rpl(pe_cpl0 ? 2'b00 : CS[1:0]),
 
     .test_mode(1'b0),
     .test_state_vector(10'h000),
@@ -2761,6 +2765,7 @@ always_ff @(posedge clk) begin
     external_dest_value = dest_value;
     if (!reset_n) begin
         CS <= 16'hF000;
+        pe_cpl0 <= 1'b0;
         DS <= 16'h0000;
         ES <= 16'h0000;
         SS <= 16'h0000;
@@ -2795,10 +2800,12 @@ always_ff @(posedge clk) begin
             DEST_CR0: begin
                 // ET is hardwired to 1 on the Intel486 (writable on the 386).
                 CR0 <= external_dest_value | 32'h0000_0010;
-                // Entering protected mode makes CPL 0 until a later control
-                // transfer establishes a different visible CS RPL.
+                // Entering protected mode makes CPL 0 until the next CS load; CS keeps
+                // its value (pe_cpl0). Leaving it ends that state.
                 if (external_dest_value[0] && !CR0[0])
-                    CS[1:0] <= 2'b00;
+                    pe_cpl0 <= 1'b1;
+                else if (!external_dest_value[0])
+                    pe_cpl0 <= 1'b0;
             end
             DEST_CR2: begin
                 CR2 <= external_dest_value;
@@ -2814,12 +2821,17 @@ always_ff @(posedge clk) begin
             DEST_CS: begin
                 // Ordinary protected-mode control transfers retain CPL. Task
                 // loading uses DEST_USTEP_TASK_CS to establish a new RPL.
+                // The first CS load after setting PE gives CS the CPL (0) as its RPL.
                 if (pe && !vm)
-                    CS[15:2] <= cs_source_value[15:2];
+                    CS <= {cs_source_value[15:2], pe_cpl0 ? 2'b00 : CS[1:0]};
                 else
                     CS <= cs_source_value;
+                pe_cpl0 <= 1'b0;
             end
-            DEST_USTEP_TASK_CS: CS <= cs_source_value;
+            DEST_USTEP_TASK_CS: begin
+                CS <= cs_source_value;
+                pe_cpl0 <= 1'b0;
+            end
             DEST_ES: ES <= external_dest_value[15:0];
             DEST_SS: SS <= external_dest_value[15:0];
             DEST_DS: DS <= external_dest_value[15:0];
@@ -2862,8 +2874,10 @@ always_ff @(posedge clk) begin
         endcase
 
         // COPY_STACK_DPL: commit the transition DPL to CS[1:0].
-        if (prot_transition.copy_stack_dpl && prot_transition.active)
+        if (prot_transition.copy_stack_dpl && prot_transition.active) begin
             CS[1:0] <= prot_transition.copy_dpl;
+            pe_cpl0 <= 1'b0;
+        end
 
         // WRITE_RPL: write new CPL into SLCTR[1:0] from loaded CS descriptor's DPL
         if (prot_transition.write_rpl)
