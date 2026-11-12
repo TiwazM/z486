@@ -891,7 +891,15 @@ always_ff @(posedge clk) begin
             ucrd_slow_wait_r <= 1'b0;
         if (ucrd_fill_done)
             ucrd_fill_wait_r <= 1'b0;
-        if (q_flush || any_fault || interrupt_entry) begin
+        // A queue flush does not end the read: its own routine's PREF is a bus
+        // uop and waits for it, and every other flush (an early CALL/RET/Jcc
+        // redirect, a PE or DR7 change) belongs to a younger instruction, which
+        // may start while the read's instruction has retired with OPR_R still
+        // owed to its delay slot or deferred register write. Dropping the wait
+        // there let that write take the previous read's OPR_R (CorePlus:
+        // `mov eax, fs:[current_task]` missed L1 right after a RET, a CALL
+        // followed, EAX got ESI's value).
+        if (any_fault || interrupt_entry) begin
             ucrd_valid_r <= 1'b0;
             ucrd_slow_req_r <= 1'b0;
             ucrd_slow_wait_r <= 1'b0;
