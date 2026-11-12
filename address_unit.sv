@@ -336,8 +336,16 @@ always_ff @(posedge clk) begin
             end
             INDOP_IN_PLUS_D: begin
                 automatic logic [31:0] next_ind = ind + ind_delta;
+                // A stack frame (PUSHA/POPA, a gate's or an interrupt's
+                // pushes) steps with the stack's size; any other segment
+                // with the instruction's address size. FSAVE/FRSTOR's image
+                // (and SGDT-style pairs) on a 16-bit SS in a 32-bit code
+                // segment wrapped at 64K (OS/2's kernel: FNSAVE [EBX] with
+                // EBX above 64K, #PF at (EBX & 0FFFFh) + 1Ch).
                 if (!pe ? !exec_addr32
-                        : !(descsw_mode ? cs_stack32 : ss_stack32))
+                        : descsw_mode ? !cs_stack32
+                        : (seg_sel == SEG_SS) ? !ss_stack32
+                        : !exec_addr32)
                     next_ind = {16'd0, next_ind[15:0]};
                 exec_ind_r <= next_ind;
             end

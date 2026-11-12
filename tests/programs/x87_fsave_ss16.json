@@ -1,0 +1,18 @@
+{
+  "asm": "x87_fsave_ss16.asm",
+  "requires_x87": true,
+  "start_mode": "protected",
+  "cr0": "0x00000011",
+  "cr3": 0,
+  "eip": 0,
+  "seg_cache": {
+    "CS": {"base": "0x10000", "limit": "0xfffff", "flags": "0xa9e0"},
+    "DS": {"base": 0, "limit": "0xfffff", "flags": "0x29e0"},
+    "SS": {"base": "0x30000", "limit": "0xffff", "flags": "0x2920"},
+    "ES": {"base": 0, "limit": "0xfffff", "flags": "0x29e0"},
+    "FS": {"base": 0, "limit": "0xfffff", "flags": "0x29e0"},
+    "GS": {"base": 0, "limit": "0xfffff", "flags": "0x29e0"}
+  },
+  "cycles": 60000,
+  "page_tables": []
+}
