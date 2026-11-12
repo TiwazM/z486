@@ -206,6 +206,7 @@ typedef struct packed {
     logic flags_backup_inactive;
     logic tss_access;
     logic interrupt_hw;
+    logic event_ext;       // an exception or external interrupt is being delivered (EXT)
     logic misc1;
     logic task_unsaved;
     logic misc2;
@@ -1098,6 +1099,7 @@ localparam [11:0] UADDR_CMPXCHG_M      = 12'h9E9;  // Optimizer-owned 486 CMPXCH
 localparam [11:0] UADDR_INVD           = 12'h9F3;  // Optimizer-owned 486 INVD/WBINVD
 localparam [11:0] UADDR_CALL_GATE_386  = 12'h5BE;  // 386 call-gate handler
 localparam [11:0] UADDR_MORE_PRIVILEGE = 12'h5FB;  // Cross-privilege call path
+localparam [11:0] UADDR_GATE_CALL_NEST = 12'h5B9;  // A gate CALL's SINTHW: nests a task switch, not an event
 
 // Group 2 instructions
 localparam ROL = 3'b000;

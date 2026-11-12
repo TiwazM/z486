@@ -365,7 +365,7 @@ function automatic logic reljump_condition(
         ALUJMP_JTSSAF: reljump_condition = c.tss_access;
         ALUJMP_JINTSW: reljump_condition = !c.interrupt_hw;
         ALUJMP_JMISC1: reljump_condition = c.misc1;
-        ALUJMP_JEXTFT: reljump_condition = c.interrupt_hw;
+        ALUJMP_JEXTFT: reljump_condition = c.event_ext;
         ALUJMP_JSTSKL: reljump_condition = !c.misc1 && !c.interrupt_hw;
         ALUJMP_JNTSKS: reljump_condition = c.task_unsaved;
         ALUJMP_JMISC2: reljump_condition = c.misc2;
