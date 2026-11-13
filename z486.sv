@@ -715,9 +715,14 @@ wire       stall_invlpg;
 assign stall = stall_mem || stall_wio || stall_x87_direct ||
                stall_invlpg || stall_fast_store || stall_rmw_probe;
 
-// Repeat
+// Repeat. Only a live word repeats (as stall_wio): after an RNI with no next
+// instruction ready the ROM runs on into the old routine's dead words, and a
+// dead RPT word with COUNTR left nonzero (by an interrupt's or IRET's
+// microcode) held the ROM, so the next issue never loaded its entry and the
+// word repeated forever (OS/2: IRQ before ARPL, store after it on a new line).
 wire       prot_result_now;
-wire       repeat_active = uc_is_rpt && (COUNTR[4:0] != 0 || prot_test_inflight) && !prot_result_now
+wire       repeat_active = uc_active && uc_is_rpt &&
+                           (COUNTR[4:0] != 0 || prot_test_inflight) && !prot_result_now
                            && !(uc_is_wio && interrupt_pending);
 
 // uc_exec: master enable for microcode execution

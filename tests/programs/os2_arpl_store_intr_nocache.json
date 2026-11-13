@@ -1,0 +1,60 @@
+{
+  "asm": "os2_arpl_store_intr.asm",
+  "start_mode": "real",
+  "cr0": 0,
+  "cr3": 0,
+  "mem_latency": 4,
+  "eip": 0,
+  "initial_selectors": {
+    "DS": 0,
+    "SS": 0,
+    "ES": 0,
+    "FS": 0,
+    "GS": 0
+  },
+  "d_init": 0,
+  "seg_cache": {
+    "CS": {
+      "base": 65536,
+      "limit": 65535,
+      "flags": 43264
+    },
+    "DS": {
+      "base": 0,
+      "limit": 65535,
+      "flags": 10496
+    },
+    "SS": {
+      "base": 0,
+      "limit": 65535,
+      "flags": 10496
+    },
+    "ES": {
+      "base": 0,
+      "limit": 65535,
+      "flags": 10496
+    },
+    "FS": {
+      "base": 0,
+      "limit": 65535,
+      "flags": 10496
+    },
+    "GS": {
+      "base": 0,
+      "limit": 65535,
+      "flags": 10496
+    }
+  },
+  "cycles": 3000000,
+  "page_tables": [
+    [
+      65536,
+      65536,
+      49,
+      "RW"
+    ]
+  ],
+  "sim_plusargs": [
+    "z486_cache_off"
+  ]
+}
