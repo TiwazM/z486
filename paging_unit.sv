@@ -884,9 +884,13 @@ always_ff @(posedge clk or negedge reset_n) begin
             end
 
             PG_MEM_TLB: begin
-                if (req_perm_fault) begin
-                    raise_perm_fault(req_linear, req_is_write, slow_is_user_mode);
-                end else if (req_can_translate) begin
+                // A TLB hit the access is not allowed takes the miss path (the
+                // final else): the walk reads the PTE again and faults only if
+                // the tables still deny it. Linux raises a PTE's permissions
+                // (R/W after copy-on-write) without INVLPG, relying on the
+                // fault dropping the stale entry: faulting from it forever
+                // livelocked CorePlus's FNSAVE into a signal frame.
+                if (req_can_translate) begin
                     if (req_check_only) begin
                         // A CW split across dwords checks the second half's
                         // page too: PG_CROSS_PREP2 points the TLB lookup at it
@@ -995,9 +999,8 @@ always_ff @(posedge clk or negedge reset_n) begin
                         emit_second_half(tlb_physical_addr);
                         state <= PG_CROSS_WAIT2;
                     end
-                end else if (tlb_hit && !slow_tlb_access_ok) begin
-                    raise_perm_fault(req_linear2, req_is_write, slow_is_user_mode);
                 end else begin
+                    // a miss, D = 0 on a write, or not allowed: walk (see PG_MEM_TLB)
                     walk_request <= 1'b1;
                     state <= PG_CROSS_WALK2;
                 end
@@ -1114,17 +1117,6 @@ endtask
 task automatic complete_mem_request();
     mem_servicing <= 1'b0;
     state <= PG_IDLE;
-endtask
-
-task automatic raise_perm_fault(
-    input [31:0] fault_addr,
-    input        fault_is_write,
-    input        fault_is_user
-);
-    cr2_reg <= fault_addr;
-    page_fault <= 1'b1;
-    fault_code <= {fault_is_user, fault_is_write, 1'b1};
-    complete_mem_request();
 endtask
 
 task automatic raise_walk_fault(

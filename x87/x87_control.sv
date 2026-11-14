@@ -33,6 +33,8 @@ module x87_control
     output logic        read_req_ready,         // Core can accept the read request.
     output logic        read_resp_valid,        // read_resp_data is valid.
     output logic [31:0] read_resp_data,         // x87-to-CPU status/result data.
+    input  logic        xfer_abandon,           // An instruction issues with the bridge idle:
+                                                // a routine's open state transfer was abandoned.
 
     input  logic        result_pop,             // A direct store takes the head result fragment.
     output logic        result_valid,           // A store result fragment heads the queue.
@@ -1180,10 +1182,27 @@ assign command_decode = command_decode_rom;
 assign v2_exec_op_port = v2_exec_op;
 `endif
 
+// FNSAVE, FNSTENV, FRSTOR and FLDENV transfer through their 386 routines,
+// which read or write every word before the RNI. A routine that faults on a
+// memory access mid-transfer (or takes an interrupt in a wait after its
+// command) leaves the transfer open: PEREQ stays up, and the restarted
+// instruction's routine waits at its start for PEREQ to fall, forever (CorePlus:
+// Linux's copy_fpstate_to_sigframe saves with FNSAVE into a user signal frame,
+// faults the page in and saves again). One still open when another instruction
+// issues was abandoned: drop it. A save's side effects (FNSAVE's
+// reinitialisation, FNSTENV's masks) wait for its last word, so the x87 is as
+// it was, as a 486 leaves it when FSAVE faults. A load is dropped once nothing
+// more is on its way (a routine that completed may have its last words in the
+// bridge and the queue still); its restart loads every word again.
+wire xfer_drop = xfer_abandon && !read_resp_valid &&
+                 ((tx_kind == TX_ENV) || (tx_kind == TX_STATE) ||
+                  (((rx_kind == RX_ENV) || (rx_kind == RX_STATE)) &&
+                   (transfer_count == 2'd0) && !word_in_valid));
+
 x87_transfer_fifo transfer_fifo (
     .clk(clk),
     .reset(reset),
-    .clear(1'b0),
+    .clear(xfer_drop),
     .push_valid(transfer_push_valid),
     .push_data(transfer_push_data),
     .push_ready(transfer_push_ready),
@@ -3076,6 +3095,19 @@ always_ff @(posedge clk) begin
             tx_index <= 5'd0;
             tx_generation_done <= 1'b0;
             tx_byte_offset <= 3'd0;
+        end
+
+        // An abandoned state transfer (xfer_drop, above) ends here, with the
+        // queue cleared: the x87 is idle for the restarted instruction.
+        if (xfer_drop) begin
+            rx_kind <= RX_NONE;
+            rx_index <= 5'd0;
+            rx_payload <= 80'h0;
+            rx_byte_count <= 4'd0;
+            tx_kind <= TX_NONE;
+            tx_index <= 5'd0;
+            tx_byte_offset <= 3'd0;
+            tx_generation_done <= 1'b0;
         end
     end
 

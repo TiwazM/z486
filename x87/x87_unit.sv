@@ -312,6 +312,9 @@ if (ENABLE_X87) begin : gen_x87
         .read_req_data_port(read_req_data_port), .read_req_be(read_req_be),
         .read_req_ready(read_req_ready), .read_resp_valid(read_resp_valid),
         .read_resp_data(read_resp_data),
+        // A state transfer still open when an instruction issues was
+        // abandoned by its routine (a fault, an interrupt): see x87_control.
+        .xfer_abandon(direct_launch && br_idle),
         .result_pop(result_pop), .result_valid(result_valid),
         .result_data(result_data),
         .result_whole_take(result_whole_take),
